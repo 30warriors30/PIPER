@@ -8,7 +8,7 @@ from typing import Any, Callable
 from experiments.calibration import calibrate_threshold_from_scores
 from experiments.config import OperatingPoint, ParetoExperimentConfig
 from utils.detection import build_detector, detection_record, load_tokenizer
-from utils.io import append_jsonl, iter_jsonl, write_json
+from utils.io import append_jsonl, iter_jsonl, read_json, write_json
 from watermark.config import (
     DatasetConfig,
     DecodingConfig,
@@ -22,7 +22,13 @@ from watermark.config import (
 )
 
 
-def _runtime_config(config: ParetoExperimentConfig, calibrated_threshold: float) -> ExperimentConfig:
+def _runtime_config(
+    config: ParetoExperimentConfig,
+    calibrated_threshold: float | None,
+) -> ExperimentConfig:
+    if config.presence_test == "z_score" and calibrated_threshold is None:
+        raise ValueError("z_score detection requires a calibrated Z threshold")
+    z_threshold = None if calibrated_threshold is None else float(calibrated_threshold)
     return ExperimentConfig(
         model=ModelConfig(
             path=config.model_path,
@@ -52,7 +58,7 @@ def _runtime_config(config: ParetoExperimentConfig, calibrated_threshold: float)
             presence_test=config.presence_test,
             threshold_mode="theoretical" if config.presence_test == "exact_binomial" else "calibrated",
             target_fpr=config.target_fpr,
-            calibrated_threshold=float(calibrated_threshold),
+            calibrated_threshold=z_threshold,
             counting_mode=config.counting_mode,
         ),
         decoding=DecodingConfig(
@@ -111,7 +117,10 @@ def run_shared_negative_detection(
             local_files_only=config.local_files_only,
         )
 
-    runtime = _runtime_config(config, calibrated_threshold=0.0)
+    runtime = _runtime_config(
+        config,
+        calibrated_threshold=0.0 if config.presence_test == "z_score" else None,
+    )
     detector = build_detector(runtime, tokenizer, int(vocab_size))
 
     output = (
@@ -210,7 +219,11 @@ def run_shared_negative_detection(
     }
 
 
-def calibrate_shared_threshold(config: ParetoExperimentConfig) -> dict[str, Any]:
+def calibrate_shared_z_threshold(
+    config: ParetoExperimentConfig,
+) -> dict[str, Any] | None:
+    if config.presence_test != "z_score":
+        return None
     records = [
         row
         for row in iter_jsonl(config.experiment_dir / "shared" / "negative_detections.jsonl")
@@ -224,15 +237,23 @@ def calibrate_shared_threshold(config: ParetoExperimentConfig) -> dict[str, Any]
     )
     result["negative_sources"] = ["unwatermarked", "natural"]
     result["input_mode"] = "known_boundary"
-    write_json(config.experiment_dir / "shared" / "calibration.json", result)
+    result["score_type"] = "z_score"
+    write_json(config.experiment_dir / "shared" / "z_calibration.json", result)
     return result
+
+
+def load_shared_z_threshold(config: ParetoExperimentConfig) -> float | None:
+    if config.presence_test != "z_score":
+        return None
+    calibration = read_json(config.experiment_dir / "shared" / "z_calibration.json")
+    return float(calibration["calibrated_threshold"])
 
 
 def run_operating_point_detection(
     config: ParetoExperimentConfig,
     point: OperatingPoint,
     *,
-    calibrated_threshold: float,
+    calibrated_threshold: float | None,
     tokenizer: Any | None = None,
     vocab_size: int | None = None,
     resume: bool = False,
@@ -272,7 +293,7 @@ def run_operating_point_detection(
     write_json(
         run_dir / "detection_config.json",
         {
-            "calibrated_threshold": calibrated_threshold,
+            "z_calibrated_threshold": calibrated_threshold,
             "target_fpr": config.target_fpr,
             "presence_test": config.presence_test,
             "counting_mode": config.counting_mode,

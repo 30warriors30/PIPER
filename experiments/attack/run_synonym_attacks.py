@@ -16,7 +16,7 @@ from tqdm import tqdm
 
 from evaluation.metrics import evaluate_records
 from experiments.config import ParetoExperimentConfig
-from experiments.detection import _runtime_config
+from experiments.detection import _runtime_config, load_shared_z_threshold
 from utils.detection import build_detector, detection_record, load_tokenizer
 from utils.io import iter_jsonl, plain, read_json, write_json
 
@@ -163,7 +163,7 @@ def build_pareto_config(experiment_dir: Path) -> ParetoExperimentConfig:
 
 def build_runtime_config(
     experiment_dir: Path,
-    calibrated_threshold: float,
+    calibrated_threshold: float | None,
     *,
     evaluate_all_policies: bool = False,
 ):
@@ -173,6 +173,10 @@ def build_runtime_config(
         model=replace(runtime.model, device="cpu"),
         decoding=replace(runtime.decoding, evaluate_all_policies=evaluate_all_policies),
     )
+
+
+def load_attack_z_threshold(experiment_dir: Path) -> float | None:
+    return load_shared_z_threshold(build_pareto_config(experiment_dir))
 
 
 def _timed_detect(function: Any, *args: Any, **kwargs: Any) -> tuple[Any, float]:
@@ -285,7 +289,7 @@ def evaluate_attack(
     detections: Sequence[dict[str, Any]],
     attacked_records: Sequence[dict[str, Any]],
     *,
-    threshold: float,
+    threshold: float | None,
     input_mode: str,
     presence_test: str = "z_score",
 ) -> dict[str, Any]:
@@ -293,6 +297,8 @@ def evaluate_attack(
     for row in detections:
         updated = dict(row)
         if presence_test == "z_score":
+            if threshold is None:
+                raise ValueError("z_score attack evaluation requires a calibrated Z threshold")
             updated["threshold"] = threshold
             updated["detected"] = float(updated.get("z_score", 0.0)) >= threshold
         frozen.append(updated)
@@ -412,8 +418,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     )
     _prepare_output(output_dir, resume=args.resume, overwrite=args.overwrite)
 
-    calibration = read_json(experiment_dir / "shared" / "calibration.json")
-    threshold = float(calibration["calibrated_threshold"])
+    threshold = load_attack_z_threshold(experiment_dir)
     runtime_config = build_runtime_config(
         experiment_dir,
         threshold,
@@ -433,7 +438,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         "point_id": args.point_id,
         "attack_rate": args.attack_rate,
         "attacks": list(args.attacks),
-        "calibrated_threshold": threshold,
+        "z_calibrated_threshold": threshold,
         "headline_input_mode": args.headline_input_mode,
         "input_modes": list(args.input_modes),
         "evaluate_all_policies": args.evaluate_all_policies,

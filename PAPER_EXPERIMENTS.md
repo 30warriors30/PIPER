@@ -81,6 +81,8 @@ python -m experiments.run_pareto_sweep \
 
 主结果读取 `runs/soft_p0_m2/metrics.json`。headline 使用 `blind_text`；`known_boundary` 只作为附录上界。
 
+该 exact-binomial 主路径不会计算、写入或读取 Z-score 校准阈值。`--calibration-samples` 保留独立样本，供 Z-score 消融和需要经验阈值的对比方法使用；它们不参与 PIPER 主判定。
+
 需要报告：
 
 - `model_fpr`、`natural_fpr`、presence TPR；
@@ -207,11 +209,22 @@ python run_detection.py --input-type samples --run-dir outputs/paper_smoke \
   --primary-decoding-policy tie_zero \
   --output-file detections_all_tokens.jsonl --overwrite
 
-# Z-score 消融
+# Z-score 理论阈值消融
 python run_detection.py --input-type samples --run-dir outputs/paper_smoke \
   --presence-test z_score --threshold-mode theoretical \
   --counting-mode unique_context --primary-decoding-policy tie_zero \
   --output-file detections_z_score.jsonl --overwrite
+
+# Z-score 经验阈值消融：先在独立负样本检测文件上校准
+python calibrate_z_threshold.py --run-dir outputs/paper_smoke \
+  --detections-file detections.jsonl --negative-source combined \
+  --input-mode blind_text --target-fpr 0.01
+
+python run_detection.py --input-type samples --run-dir outputs/paper_smoke \
+  --presence-test z_score --threshold-mode calibrated \
+  --calibration-file outputs/paper_smoke/z_calibration.json \
+  --counting-mode unique_context --primary-decoding-policy tie_zero \
+  --output-file detections_z_calibrated.jsonl --overwrite
 
 # Decoder 消融；presence gate 保持不变
 for POLICY in strict hard_fill error_erasure; do

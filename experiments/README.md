@@ -2,7 +2,7 @@
 
 The `paper` preset is the headline PIPER operating point: `soft_p0_m2` (`delta_presence=0`, `delta_payload=2`) with `unique_context`, an exact-binomial presence gate, blind-text reporting, and tie-to-zero conditional decoding. The `smoke`, `pilot`, and `full` grids are ablations; calibrated Z-score language below applies only when `--presence-test z_score` is selected.
 
-This directory implements the no-attack experiment for the dual-layer watermark. It fixes prompts, natural continuations, payloads, BCH codewords, and random seeds once, generates the unwatermarked baseline once, calibrates one frozen presence threshold on a disjoint calibration split, and scans watermark operating points on the test split.
+This directory implements the no-attack experiment for the dual-layer watermark. It fixes prompts, natural continuations, payloads, BCH codewords, and random seeds once, generates the unwatermarked baseline once, and scans watermark operating points on the test split. The exact-binomial paper path neither computes nor reads a calibrated Z threshold. The disjoint calibration split remains available for Z-score ablations and comparison methods; `shared/z_calibration.json` is created only when `--presence-test z_score` is selected.
 
 ## What the experiment measures
 
@@ -16,7 +16,8 @@ Everything else is shared: model, prompts, 200-token continuations, payloads, sa
 
 The pipeline reports:
 
-- TPR at a frozen calibration threshold;
+- exact-binomial TPR at the declared alpha for the paper path;
+- TPR at a frozen calibration threshold for the Z-score ablation;
 - model-generated and natural-text FPR on the test split;
 - strict, hard-fill, and bounded error-erasure exact recovery;
 - wrong-message and abstention rates;
@@ -36,7 +37,7 @@ outputs/experiments/<experiment_id>/
 ├── shared/
 │   ├── baseline.jsonl
 │   ├── negative_detections.jsonl
-│   ├── calibration.json
+│   ├── z_calibration.json   # Z-score mode only
 │   └── quality.jsonl
 ├── runs/
 │   └── <point_id>/
@@ -123,8 +124,8 @@ Long experiments can be split into stages:
 # Build the fixed manifest.
 python experiments/run_pareto_sweep.py ... --stage manifest --overwrite
 
-# Generate shared unwatermarked baselines, detect negatives, calibrate the threshold,
-# and evaluate shared quality.
+# Generate shared unwatermarked baselines, detect negatives, and evaluate shared
+# quality. Z-score mode additionally writes shared/z_calibration.json.
 python experiments/run_pareto_sweep.py ... --stage baseline --resume
 
 # Generate/detect/score every selected operating point.
@@ -169,7 +170,7 @@ Documents that cannot provide prompt context plus exactly 200 natural tokens are
 The most important columns in `sweep_results.csv` are:
 
 - `relative_ppl_increase`: quality cost; lower is better;
-- `tpr`: presence detection at the frozen threshold; higher is better;
+- `tpr`: exact-binomial presence detection at alpha in the paper path, or detection at the frozen threshold in the Z-score ablation; higher is better;
 - `model_fpr` and `natural_fpr`: test-set false-positive rates;
 - `correct_attribution_rate`: paper headline CAR;
 - `conditional_decoding_accuracy`: payload accuracy conditional on presence acceptance;
@@ -227,7 +228,7 @@ conda run -n BREW python -m experiments.attack.run_synonym_attacks \
   --overwrite
 ```
 
-The runner reads the frozen threshold from `shared/calibration.json` and never regenerates text. Outputs are written to:
+With `exact_binomial`, the runner reuses each detector's exact p-value decision and does not require a calibration file. With `z_score`, it reads the frozen threshold from `shared/z_calibration.json`. It never regenerates text. Outputs are written to:
 
 ```text
 outputs/experiments/opt13b_pareto_49x200/attacks/soft_p0_m2_synonym_rate10/

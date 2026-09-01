@@ -9,7 +9,8 @@ if str(ROOT) not in sys.path:
 
 from experiments.arguments import config_from_args, experiment_parser, points_from_args, print_plan
 from experiments.detection import (
-    calibrate_shared_threshold,
+    calibrate_shared_z_threshold,
+    load_shared_z_threshold,
     run_operating_point_detection,
     run_shared_negative_detection,
 )
@@ -18,7 +19,6 @@ from experiments.manifest import build_manifest
 from experiments.metrics import compute_operating_point_metrics
 from experiments.pareto import aggregate_experiment
 from experiments.quality import score_operating_point_quality, score_shared_quality
-from utils.io import read_json
 from utils.model import model_max_length
 
 
@@ -41,7 +41,7 @@ def _run_baseline(config, generator, *, resume: bool, overwrite: bool):
         resume=resume,
         overwrite=overwrite,
     )
-    calibration = calibrate_shared_threshold(config)
+    calibration = calibrate_shared_z_threshold(config)
     quality = score_shared_quality(
         config,
         model=generator.model,
@@ -53,8 +53,7 @@ def _run_baseline(config, generator, *, resume: bool, overwrite: bool):
 
 
 def _run_sweep(config, points, generator, *, resume: bool, overwrite: bool):
-    calibration = read_json(config.experiment_dir / "shared" / "calibration.json")
-    threshold = float(calibration["calibrated_threshold"])
+    threshold = load_shared_z_threshold(config)
     results = {}
     for point in points:
         generated = run_operating_point_generation(

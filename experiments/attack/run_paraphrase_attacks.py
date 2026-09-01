@@ -15,7 +15,7 @@ from tqdm import tqdm
 
 from evaluation.metrics import evaluate_records
 from utils.detection import build_detector, detection_record, load_tokenizer
-from utils.io import plain, read_json, write_json
+from utils.io import plain, write_json
 
 from experiments.attack.run_synonym_attacks import (
     DEFAULT_EXPERIMENT_DIR,
@@ -26,6 +26,7 @@ from experiments.attack.run_synonym_attacks import (
     _timed_detect,
     _write_jsonl,
     build_runtime_config,
+    load_attack_z_threshold,
     load_attack_examples,
     resolve_input_path,
     resolve_output_path,
@@ -234,7 +235,7 @@ def evaluate_paraphrase_attack(
     detections: Sequence[dict[str, Any]],
     attacked_records: Sequence[dict[str, Any]],
     *,
-    threshold: float,
+    threshold: float | None,
     input_mode: str,
     presence_test: str = "z_score",
 ) -> dict[str, Any]:
@@ -242,6 +243,8 @@ def evaluate_paraphrase_attack(
     for row in detections:
         updated = dict(row)
         if presence_test == "z_score":
+            if threshold is None:
+                raise ValueError("z_score attack evaluation requires a calibrated Z threshold")
             updated["threshold"] = threshold
             updated["detected"] = float(updated.get("z_score", 0.0)) >= threshold
         frozen.append(updated)
@@ -489,8 +492,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     )
     _prepare_output(output_dir, resume=args.resume, overwrite=args.overwrite)
 
-    calibration = read_json(experiment_dir / "shared" / "calibration.json")
-    threshold = float(calibration["calibrated_threshold"])
+    threshold = load_attack_z_threshold(experiment_dir)
     runtime_config = build_runtime_config(
         experiment_dir,
         threshold,
@@ -521,7 +523,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         "experiment_dir": str(experiment_dir),
         "point_id": args.point_id,
         "attack": args.attack,
-        "calibrated_threshold": threshold,
+        "z_calibrated_threshold": threshold,
         "headline_input_mode": args.headline_input_mode,
         "input_modes": list(args.input_modes),
         "evaluate_all_policies": args.evaluate_all_policies,

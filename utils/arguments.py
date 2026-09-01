@@ -224,7 +224,7 @@ def calibration_parser() -> argparse.ArgumentParser:
     parser.add_argument("--negative-source", default="unwatermarked", choices=["unwatermarked", "natural", "combined"])
     parser.add_argument("--input-mode", default="known_boundary", choices=["known_boundary", "blind_text"])
     parser.add_argument("--target-fpr", type=float, default=0.01)
-    parser.add_argument("--output-file", default="calibration.json")
+    parser.add_argument("--output-file", default="z_calibration.json")
     parser.add_argument("--dry-run", action="store_true")
     return parser
 

@@ -31,7 +31,7 @@ The project has no YAML configuration, no `src/` layout, no editable installatio
 run_generation.py
 run_detection.py
 evaluate_results.py
-calibrate_threshold.py
+calibrate_z_threshold.py       # Z-score ablation only
 watermark/
 evaluation/
 utils/
@@ -243,7 +243,7 @@ The paper main exact-binomial test does not use this calibration step. Use it on
 At a 1% target FPR, at least 100 independent negative calibration samples are required.
 
 ```bash
-python calibrate_threshold.py \
+python calibrate_z_threshold.py \
   --run-dir outputs/c4_opt13b_piper_200 \
   --negative-source unwatermarked \
   --input-mode known_boundary \
@@ -258,7 +258,7 @@ python run_detection.py \
   --run-dir outputs/c4_opt13b_piper_200 \
   --presence-test z_score \
   --threshold-mode calibrated \
-  --calibration-file outputs/c4_opt13b_hard_200/calibration.json \
+  --calibration-file outputs/c4_opt13b_piper_200/z_calibration.json \
   --output-file detections_calibrated.jsonl
 ```
 
@@ -322,7 +322,7 @@ outputs/<run_id>/
 ├── metrics.csv
 ├── roc_points.csv
 ├── summary.txt
-├── calibration.json
+├── z_calibration.json       # present only for a calibrated Z-score ablation
 ├── logs/
 └── errors/
 ```

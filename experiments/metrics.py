@@ -7,8 +7,9 @@ import numpy as np
 
 from evaluation.metrics import evaluate_records
 from experiments.config import OperatingPoint, ParetoExperimentConfig
+from experiments.detection import load_shared_z_threshold
 from experiments.quality import quality_summary
-from utils.io import iter_jsonl, read_json, write_json
+from utils.io import iter_jsonl, write_json
 
 
 def _bits(value: Any) -> tuple[int, ...] | None:
@@ -97,9 +98,8 @@ def compute_operating_point_metrics(
         )
         if row.get("split", "test") == "test" and row.get("input_mode") == input_mode
     ]
-    calibration_path = config.experiment_dir / "shared" / "calibration.json"
-    if calibration_path.exists() and config.presence_test == "z_score":
-        frozen_threshold = float(read_json(calibration_path)["calibrated_threshold"])
+    frozen_threshold = load_shared_z_threshold(config)
+    if frozen_threshold is not None:
         combined = []
         for row in negative_records + watermarked_records:
             updated = dict(row)
