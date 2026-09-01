@@ -1,0 +1,16 @@
+name: dual-watermark-blackwell
+
+channels:
+  - conda-forge
+
+dependencies:
+  - python=3.10
+  - pip
+  - setuptools
+  - wheel
+  - git
+  - pip:
+      - --index-url=https://download.pytorch.org/whl/cu128
+      - --extra-index-url=https://pypi.org/simple
+      - torch==2.8.0
+      - -r requirements.txt

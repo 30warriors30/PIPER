@@ -1,0 +1,11 @@
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.coverage
+htmlcov/
+outputs/*
+!outputs/.gitkeep
+*.log
+.DS_Store
+
+.worktrees/

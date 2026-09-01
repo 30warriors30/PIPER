@@ -1,0 +1,16 @@
+# PyTorch is intentionally installed separately from the official CUDA 12.8 index.
+transformers==4.56.2
+datasets==2.21.0
+accelerate==1.10.1
+safetensors==0.6.2
+galois==0.4.11
+numpy==1.26.4
+scipy==1.13.1
+scikit-learn==1.5.2
+joblib==1.4.2
+threadpoolctl==3.5.0
+tqdm==4.67.1
+requests==2.32.4
+charset-normalizer==3.4.3
+pytest==8.3.5
+pytest-cov==6.0.0
