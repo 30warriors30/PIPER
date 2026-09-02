@@ -3,6 +3,29 @@ from __future__ import annotations
 import hashlib
 from collections.abc import Sequence
 
+MASK64 = (1 << 64) - 1
+ROUND_DOMAINS = (
+    0x243F6A8885A308D3,
+    0x13198A2E03707344,
+    0xA4093822299F31D0,
+    0x082EFA98EC4E6C89,
+    0x452821E638D01377,
+    0xBE5466CF34E90C6C,
+)
+
+
+def _avalanche64(value: int) -> int:
+    value = (value ^ (value >> 30)) * 0xBF58476D1CE4E5B9 & MASK64
+    value = (value ^ (value >> 27)) * 0x94D049BB133111EB & MASK64
+    return value ^ (value >> 31)
+
+
+def partition_round_keys(base_seed: int) -> tuple[int, ...]:
+    return tuple(
+        _avalanche64((int(base_seed) ^ domain) & MASK64)
+        for domain in ROUND_DOMAINS
+    )
+
 
 class KeyedPRF:
     """Deterministic keyed PRF based on BLAKE2b."""
