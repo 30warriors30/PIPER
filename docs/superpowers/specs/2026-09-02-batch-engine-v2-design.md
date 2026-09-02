@@ -89,8 +89,11 @@ six-round balanced Feistel permutation:
 1. Map eligible token IDs to dense eligible indices.
 2. Choose the smallest even bit width whose power-of-two domain contains all
    eligible indices.
-3. Derive six 64-bit round keys from the existing keyed context PRF with
-   domain labels `partition-v2-round-0` through `partition-v2-round-5`.
+3. Resolve the partition and allocator base seeds with the existing
+   `paper_shared` or `domain_separated` rule. Expand the partition base seed
+   into six 64-bit round keys with fixed `partition-v2-round-0` through
+   `partition-v2-round-5` ARX domain constants. In `paper_shared` mode, the
+   allocator continues to use the same unexpanded base seed.
 4. Use a specified 64-bit ARX avalanche function for each Feistel round and
    mask its result to the half-domain width.
 5. Cycle-walk outputs outside the eligible-index domain until the result is in
@@ -262,6 +265,13 @@ and text class. A hybrid output directory is always labeled `hybrid-v1-v2` in
 metadata and summaries. If a legacy file changes after migration, its digest
 mismatch stops resume before any new output is written.
 
+Hybrid detection routes each record to the matching partition engine. A record
+without `engine_version`, or one frozen by the migration sidecar, uses the
+legacy PCG64 partitioner. A record marked `engine_version=2` uses the stateless
+v2 partitioner. Detection outputs record `source_engine_version`; mixed input
+batches are split by engine inside each worker and restored to source order.
+This routing is mandatory for both known-boundary and blind-text detection.
+
 ## Migration Scope
 
 ### PIPER generation and detection
@@ -344,6 +354,8 @@ provided.
 - Explicit v1 import freezes valid completed keys and schedules only missing
   generation/detection work.
 - Hybrid summaries report v1/v2 composition for every run point and text class.
+- Hybrid detection routes v1 and v2 records to their matching partition engine
+  and preserves source order.
 
 ## Documentation and Rollout
 
