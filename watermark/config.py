@@ -1,8 +1,10 @@
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
+
+from watermark.execution import BatchExecutionConfig
 
 
 @dataclass(frozen=True)
@@ -96,6 +98,7 @@ class ExperimentConfig:
     detection: DetectionConfig
     decoding: DecodingConfig
     output: OutputConfig
+    execution: BatchExecutionConfig = field(default_factory=BatchExecutionConfig)
     schema_version: int = 1
 
     @property
@@ -118,5 +121,6 @@ class ExperimentConfig:
             detection=DetectionConfig(**data.get("detection", {})),
             decoding=DecodingConfig(**data.get("decoding", {})),
             output=OutputConfig(**data["output"]),
+            execution=BatchExecutionConfig(**data["execution"]),
             schema_version=int(data.get("schema_version", 1)),
         )

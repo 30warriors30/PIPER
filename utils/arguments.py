@@ -14,10 +14,40 @@ from watermark.config import (
     OutputConfig,
     WatermarkConfig,
 )
+from watermark.execution import BatchExecutionConfig
+
+from utils.validation import validate_batch_execution_args
 
 
 def _bool_action() -> type[argparse.Action]:
     return argparse.BooleanOptionalAction
+
+
+def add_batch_execution_arguments(
+    parser: argparse.ArgumentParser,
+    *,
+    include_generation: bool = True,
+    include_detection: bool = True,
+    include_import: bool = True,
+) -> None:
+    if include_generation:
+        parser.add_argument("--generation-batch-size", type=int, default=16)
+    if include_detection:
+        parser.add_argument("--detection-batch-size", type=int, default=64)
+        parser.add_argument("--detection-workers", type=int, default=8)
+    if include_import:
+        parser.add_argument("--import-v1-completed", action="store_true")
+
+
+def batch_execution_config_from_args(
+    args: argparse.Namespace,
+) -> BatchExecutionConfig:
+    validate_batch_execution_args(args)
+    return BatchExecutionConfig(
+        generation_batch_size=int(getattr(args, "generation_batch_size", 16)),
+        detection_batch_size=int(getattr(args, "detection_batch_size", 64)),
+        detection_workers=int(getattr(args, "detection_workers", 8)),
+    )
 
 
 def generation_parser() -> argparse.ArgumentParser:
@@ -89,11 +119,13 @@ def generation_parser() -> argparse.ArgumentParser:
     group = parser.add_mutually_exclusive_group()
     group.add_argument("--resume", action="store_true")
     group.add_argument("--overwrite", action="store_true")
+    add_batch_execution_arguments(parser)
     parser.add_argument("--dry-run", action="store_true")
     return parser
 
 
 def generation_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
+    execution = batch_execution_config_from_args(args)
     hard_fill: int | str = args.hard_fill_value
     if hard_fill in {"0", "1"}:
         hard_fill = int(hard_fill)
@@ -160,6 +192,7 @@ def generation_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
             max_erasure_assignments=args.max_erasure_assignments,
         ),
         output=OutputConfig(root=args.output_root, run_id=args.run_id),
+        execution=execution,
     )
 
 
@@ -199,6 +232,7 @@ def detection_parser() -> argparse.ArgumentParser:
     parser.add_argument("--max-erasure-assignments", type=int, default=64)
     parser.add_argument("--resume", action="store_true")
     parser.add_argument("--overwrite", action="store_true")
+    add_batch_execution_arguments(parser)
     parser.add_argument("--dry-run", action="store_true")
     return parser
 

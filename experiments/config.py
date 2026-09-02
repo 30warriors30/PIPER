@@ -4,6 +4,8 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 
+from watermark.execution import BatchExecutionConfig
+
 
 def _number_slug(value: float) -> str:
     text = f"{float(value):g}"
@@ -68,6 +70,9 @@ class ParetoExperimentConfig:
     dataset_streaming: bool = True
     dataset_path: str | None = None
     sample_offset: int = 0
+    generation_batch_size: int = 16
+    detection_batch_size: int = 64
+    detection_workers: int = 8
 
     def __post_init__(self) -> None:
         if self.calibration_samples <= 0:
@@ -84,6 +89,11 @@ class ParetoExperimentConfig:
             raise ValueError("presence_test must be exact_binomial or z_score")
         if not self.experiment_id.strip():
             raise ValueError("experiment_id must not be empty")
+        BatchExecutionConfig(
+            generation_batch_size=self.generation_batch_size,
+            detection_batch_size=self.detection_batch_size,
+            detection_workers=self.detection_workers,
+        )
 
     @property
     def experiment_dir(self) -> Path:

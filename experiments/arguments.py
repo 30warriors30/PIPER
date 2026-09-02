@@ -5,6 +5,10 @@ from pathlib import Path
 
 from experiments.config import ParetoExperimentConfig
 from experiments.presets import preset_points
+from utils.arguments import (
+    add_batch_execution_arguments,
+    batch_execution_config_from_args,
+)
 
 
 def experiment_parser(description: str = "Run dual-layer watermark Pareto experiments.") -> argparse.ArgumentParser:
@@ -53,11 +57,13 @@ def experiment_parser(description: str = "Run dual-layer watermark Pareto experi
     group = parser.add_mutually_exclusive_group()
     group.add_argument("--resume", action="store_true")
     group.add_argument("--overwrite", action="store_true")
+    add_batch_execution_arguments(parser)
     parser.add_argument("--dry-run", action="store_true")
     return parser
 
 
 def config_from_args(args: argparse.Namespace) -> ParetoExperimentConfig:
+    execution = batch_execution_config_from_args(args)
     smoke = args.preset == "smoke"
     calibration_samples = args.calibration_samples if args.calibration_samples is not None else (20 if smoke else 200)
     test_samples = args.test_samples if args.test_samples is not None else (20 if smoke else 200)
@@ -92,6 +98,9 @@ def config_from_args(args: argparse.Namespace) -> ParetoExperimentConfig:
         dataset_streaming=args.dataset_streaming,
         dataset_path=args.dataset_path,
         sample_offset=args.sample_offset,
+        generation_batch_size=execution.generation_batch_size,
+        detection_batch_size=execution.detection_batch_size,
+        detection_workers=execution.detection_workers,
     )
 
 

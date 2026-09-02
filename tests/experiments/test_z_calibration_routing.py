@@ -83,6 +83,10 @@ def test_exact_binomial_runtime_does_not_require_calibrated_threshold(tmp_path: 
     assert runtime.detection.presence_test == "exact_binomial"
     assert runtime.detection.threshold_mode == "theoretical"
     assert runtime.detection.calibrated_threshold is None
+    assert runtime.execution.engine_version == 2
+    assert runtime.execution.generation_batch_size == 16
+    assert runtime.execution.detection_batch_size == 64
+    assert runtime.execution.detection_workers == 8
 
 
 def test_exact_binomial_attack_does_not_require_z_calibration_file(tmp_path: Path) -> None:

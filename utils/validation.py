@@ -1,11 +1,19 @@
 from __future__ import annotations
 
 import json
+from argparse import Namespace
 from pathlib import Path
 from typing import Any
 
 from watermark.config import ExperimentConfig
 from watermark.ecc import BCHCodec
+
+
+def validate_batch_execution_args(args: Namespace) -> None:
+    if getattr(args, "import_v1_completed", False) and not getattr(
+        args, "resume", False
+    ):
+        raise ValueError("--import-v1-completed requires --resume")
 
 
 def validate_experiment_config(
