@@ -1,11 +1,18 @@
 from dataclasses import FrozenInstanceError
+from pathlib import Path
+import subprocess
+import sys
 
 import pytest
 
+import run_detection
 from experiments.arguments import config_from_args, experiment_parser
 from utils.arguments import generation_config_from_args, generation_parser
 from watermark.config import ExperimentConfig
 from watermark.execution import BatchExecutionConfig
+
+
+ROOT = Path(__file__).resolve().parents[1]
 
 
 def test_generation_parser_builds_config() -> None:
@@ -91,3 +98,116 @@ def test_pareto_parser_passes_batch_overrides_to_config() -> None:
     assert config.generation_batch_size == 3
     assert config.detection_batch_size == 5
     assert config.detection_workers == 2
+
+
+def test_detection_entrypoint_rejects_import_without_resume() -> None:
+    completed = subprocess.run(
+        [
+            sys.executable,
+            str(ROOT / "run_detection.py"),
+            "--input-type",
+            "samples",
+            "--run-dir",
+            "run",
+            "--dry-run",
+            "--import-v1-completed",
+        ],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert completed.returncode != 0
+    assert "--import-v1-completed requires --resume" in completed.stderr
+
+
+@pytest.mark.parametrize(
+    ("option", "value", "message"),
+    [
+        ("--generation-batch-size", "0", "generation_batch_size must be positive"),
+        ("--detection-batch-size", "-1", "detection_batch_size must be positive"),
+        ("--detection-workers", "0", "detection_workers must be positive"),
+    ],
+)
+def test_detection_entrypoint_rejects_non_positive_execution_values(
+    option: str,
+    value: str,
+    message: str,
+) -> None:
+    completed = subprocess.run(
+        [
+            sys.executable,
+            str(ROOT / "run_detection.py"),
+            "--input-type",
+            "samples",
+            "--run-dir",
+            "run",
+            "--dry-run",
+            option,
+            value,
+        ],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert completed.returncode != 0
+    assert message in completed.stderr
+
+
+@pytest.mark.parametrize(
+    ("runner_name", "mode_args"),
+    [
+        ("run_samples_detection", ["--input-type", "samples", "--run-dir", "run"]),
+        (
+            "run_text_detection",
+            [
+                "--input-type",
+                "text",
+                "--input-file",
+                "input.jsonl",
+                "--output-dir",
+                "output",
+                "--model-path",
+                "model",
+                "--secret-key",
+                "key",
+            ],
+        ),
+    ],
+)
+def test_detection_entrypoint_threads_execution_overrides(
+    monkeypatch: pytest.MonkeyPatch,
+    runner_name: str,
+    mode_args: list[str],
+) -> None:
+    captured: dict[str, object] = {}
+
+    def fake_runner(*args: object, **kwargs: object) -> dict[str, int]:
+        captured.update(kwargs)
+        return {"failed": 0}
+
+    monkeypatch.setattr(run_detection, runner_name, fake_runner)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "run_detection.py",
+            *mode_args,
+            "--generation-batch-size",
+            "3",
+            "--detection-batch-size",
+            "5",
+            "--detection-workers",
+            "2",
+        ],
+    )
+
+    assert run_detection.main() == 0
+    assert captured["execution"] == BatchExecutionConfig(
+        generation_batch_size=3,
+        detection_batch_size=5,
+        detection_workers=2,
+    )

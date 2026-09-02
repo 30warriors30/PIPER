@@ -4,7 +4,7 @@ import json
 import sys
 from pathlib import Path
 
-from utils.arguments import detection_parser
+from utils.arguments import batch_execution_config_from_args, detection_parser
 from utils.detection import run_samples_detection, run_text_detection
 
 
@@ -17,6 +17,7 @@ def _calibrated_threshold(path: str | None) -> float | None:
 
 def main() -> int:
     args = detection_parser().parse_args()
+    execution = batch_execution_config_from_args(args)
     hard_fill: int | str = int(args.hard_fill_value) if args.hard_fill_value in {"0", "1"} else "prf"
     calibrated = _calibrated_threshold(args.calibration_file)
     if args.threshold_mode == "calibrated" and calibrated is None:
@@ -44,6 +45,7 @@ def main() -> int:
             output_file=args.output_file or "detections.jsonl",
             resume=args.resume,
             overwrite=args.overwrite,
+            execution=execution,
         )
     else:
         required = {
@@ -87,6 +89,7 @@ def main() -> int:
             hard_fill_value=hard_fill,
             max_erasure_assignments=args.max_erasure_assignments,
             overwrite=args.overwrite,
+            execution=execution,
         )
     print(result)
     return 0 if result.get("failed", 0) == 0 else 2

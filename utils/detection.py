@@ -25,6 +25,7 @@ from watermark.config import (
 )
 from watermark.detector import DualLayerDetector
 from watermark.ecc import BCHCodec
+from watermark.execution import BatchExecutionConfig
 from watermark.result_types import DetectionResult
 
 
@@ -154,6 +155,7 @@ def _updated_detection_config(
     min_tokens_per_code_bit: int,
     hard_fill_value: int | str,
     max_erasure_assignments: int,
+    execution: BatchExecutionConfig | None = None,
 ) -> ExperimentConfig:
     return ExperimentConfig(
         model=config.model,
@@ -178,6 +180,7 @@ def _updated_detection_config(
             evaluate_all_policies=True,
         ),
         output=config.output,
+        execution=config.execution if execution is None else execution,
         schema_version=config.schema_version,
     )
 
@@ -199,6 +202,7 @@ def run_samples_detection(
     output_file: str = "detections.jsonl",
     resume: bool = False,
     overwrite: bool = False,
+    execution: BatchExecutionConfig | None = None,
 ) -> dict[str, Any]:
     if resume and overwrite:
         raise ValueError("resume and overwrite are mutually exclusive")
@@ -217,6 +221,7 @@ def run_samples_detection(
         min_tokens_per_code_bit=min_tokens_per_code_bit,
         hard_fill_value=hard_fill_value,
         max_erasure_assignments=max_erasure_assignments,
+        execution=execution,
     )
     tokenizer, vocab_size = load_tokenizer(config.model.path, local_files_only=config.model.local_files_only)
     detector = build_detector(config, tokenizer, vocab_size)
@@ -317,6 +322,7 @@ def _external_config(
     hard_fill_value: int | str,
     max_erasure_assignments: int,
     output_dir: Path,
+    execution: BatchExecutionConfig,
 ) -> ExperimentConfig:
     return ExperimentConfig(
         model=ModelConfig(path=model_path, device="cpu", dtype="float32", local_files_only=True),
@@ -346,6 +352,7 @@ def _external_config(
             max_erasure_assignments=max_erasure_assignments,
         ),
         output=OutputConfig(root=str(output_dir.parent), run_id=output_dir.name),
+        execution=execution,
     )
 
 
@@ -378,6 +385,7 @@ def run_text_detection(
     hard_fill_value: int | str,
     max_erasure_assignments: int = 64,
     overwrite: bool = False,
+    execution: BatchExecutionConfig | None = None,
 ) -> dict[str, Any]:
     if not input_file.exists():
         raise FileNotFoundError(input_file)
@@ -409,6 +417,7 @@ def run_text_detection(
         hard_fill_value=hard_fill_value,
         max_erasure_assignments=max_erasure_assignments,
         output_dir=output_dir,
+        execution=execution if execution is not None else BatchExecutionConfig(),
     )
     tokenizer, vocab_size = load_tokenizer(model_path)
     detector = build_detector(config, tokenizer, vocab_size)

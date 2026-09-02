@@ -20,6 +20,7 @@ from watermark.config import (
     OutputConfig,
     WatermarkConfig,
 )
+from watermark.execution import BatchExecutionConfig
 
 
 def _runtime_config(
@@ -67,6 +68,11 @@ def _runtime_config(
             evaluate_all_policies=True,
         ),
         output=OutputConfig(root=str(config.experiment_dir), run_id="experiment"),
+        execution=BatchExecutionConfig(
+            generation_batch_size=config.generation_batch_size,
+            detection_batch_size=config.detection_batch_size,
+            detection_workers=config.detection_workers,
+        ),
     )
 
 

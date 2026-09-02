@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 import json
 import subprocess
 import sys
@@ -87,6 +88,21 @@ def test_exact_binomial_runtime_does_not_require_calibrated_threshold(tmp_path: 
     assert runtime.execution.generation_batch_size == 16
     assert runtime.execution.detection_batch_size == 64
     assert runtime.execution.detection_workers == 8
+
+
+def test_runtime_config_preserves_batch_execution_overrides(tmp_path: Path) -> None:
+    config = replace(
+        _config(tmp_path, presence_test="exact_binomial"),
+        generation_batch_size=3,
+        detection_batch_size=5,
+        detection_workers=2,
+    )
+
+    runtime = _runtime_config(config, calibrated_threshold=None)
+
+    assert runtime.execution.generation_batch_size == 3
+    assert runtime.execution.detection_batch_size == 5
+    assert runtime.execution.detection_workers == 2
 
 
 def test_exact_binomial_attack_does_not_require_z_calibration_file(tmp_path: Path) -> None:

@@ -2,7 +2,11 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from utils.detection import build_detector, run_samples_detection
+from utils.detection import (
+    _updated_detection_config,
+    build_detector,
+    run_samples_detection,
+)
 from utils.io import append_jsonl, iter_jsonl, write_json
 from watermark.config import (
     DatasetConfig,
@@ -16,6 +20,7 @@ from watermark.config import (
     WatermarkConfig,
 )
 from watermark.ecc import BCHCodec
+from watermark.execution import BatchExecutionConfig
 
 
 class FakeTokenizer:
@@ -24,6 +29,42 @@ class FakeTokenizer:
 
     def __len__(self):
         return 32
+
+
+def test_updated_detection_config_preserves_execution() -> None:
+    execution = BatchExecutionConfig(
+        generation_batch_size=3,
+        detection_batch_size=5,
+        detection_workers=2,
+    )
+    config = ExperimentConfig(
+        model=ModelConfig(path="fake", device="cpu", dtype="float32"),
+        dataset=DatasetConfig(),
+        generation=GenerationConfig(),
+        watermark=WatermarkConfig(secret_key="secret"),
+        ecc=ECCConfig(),
+        detection=DetectionConfig(),
+        decoding=DecodingConfig(),
+        output=OutputConfig(root="outputs", run_id="run"),
+        execution=execution,
+    )
+
+    updated = _updated_detection_config(
+        config,
+        presence_test="exact_binomial",
+        threshold_mode="theoretical",
+        target_fpr=0.01,
+        fixed_threshold=2.326347874,
+        calibrated_threshold=None,
+        counting_mode="unique_context",
+        unique_ngram_width=4,
+        primary_policy="tie_zero",
+        min_tokens_per_code_bit=1,
+        hard_fill_value=0,
+        max_erasure_assignments=64,
+    )
+
+    assert updated.execution == execution
 
 
 def test_samples_detection_writes_six_records(tmp_path: Path, monkeypatch) -> None:
