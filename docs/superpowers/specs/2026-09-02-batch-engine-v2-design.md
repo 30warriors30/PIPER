@@ -32,11 +32,14 @@ the GPU near 20 percent utilization even during continuous generation.
 5. Make one Batch Engine v2 configuration reproducible. Bit-for-bit identity
    with legacy batch-one output, or across different batch sizes, is not a
    requirement.
+6. Allow an explicit one-time import of completed v1 records so interrupted
+   formal runs can finish with v2 without regenerating completed samples.
 
 ## Non-Goals
 
 - Batch Engine v1 and v2 output are not compared for text identity or speed.
-- Existing v1 experiment directories are not resumed with v2.
+- Legacy records imported into a hybrid run are never rewritten or presented
+  as v2-generated records.
 - The engine does not silently change batch size after an out-of-memory error.
 - This work does not alter BCH parameters, presence tests, counting rules,
   payload policies, quality definitions, or paper headline settings.
@@ -54,9 +57,14 @@ detection_workers = 8
 
 All three numeric values must be positive. Common CLI helpers add the same
 options and defaults to every relevant command. Experiment metadata records all
-four fields. Resume validation rejects a missing or different engine version,
-generation batch size, detection batch size, or worker count. This deliberately
-prevents a directory from containing mixed sampling streams.
+four fields. Pure-v2 resume validation rejects a missing or different engine
+version, generation batch size, detection batch size, or worker count.
+
+An existing v1 directory requires the explicit combination `--resume
+--import-v1-completed`. The import creates `engine_migration.json` before model
+loading. Subsequent resumes read that sidecar and reject either a repeated
+import flag or different v2 execution parameters. There is no implicit v1/v2
+mixing.
 
 An OOM exception identifies the attempted batch size and recommends rerunning
 from a new output directory with a smaller explicit value. The engine never
@@ -138,6 +146,14 @@ On resume, a partially persisted batch is regenerated with all of its original
 members and seed; only missing records are appended. Completed-row filtering
 never changes batch membership. Changing grouping or batch size changes the
 sampling stream and is rejected by metadata validation.
+
+For a one-time v1 import, each artifact's existing completion keys form an
+immutable frozen set. The engine builds an ordered migration workload from only
+the missing source items and assigns v2 batch positions within that workload.
+Frozen v1 items are neither loaded into a model batch nor detected again. The
+migration workload, source artifact digests, frozen completion-key digests, and
+v2 batch membership are recorded in `engine_migration.json`. Later v2 resumes
+use this recorded membership rather than recomputing it from current files.
 
 Generation uses the Transformers KV cache. Optional compile/static-cache
 settings are excluded from the first implementation because they can introduce
@@ -229,6 +245,23 @@ line and reports a truncated record rather than silently skipping it.
 Batch errors never cause successful records to be marked complete before they
 are persisted. Resume begins with the first missing completion key.
 
+### Hybrid v1/v2 Migration
+
+Hybrid migration is an explicit compatibility path, not a claim that v1 and v2
+produce identical samples. The migration transaction:
+
+1. validates every existing JSONL line and rejects duplicate completion keys;
+2. records SHA256 digests and completed counts for every existing artifact;
+3. marks those keys as `engine_version=1` in the migration sidecar without
+   modifying legacy JSONL records;
+4. records the exact ordered missing-key workload and immutable v2 batches;
+5. writes all new records with `engine_version=2` and their v2 batch metadata.
+
+Aggregate results add `engine_composition`, including v1/v2 counts by run point
+and text class. A hybrid output directory is always labeled `hybrid-v1-v2` in
+metadata and summaries. If a legacy file changes after migration, its digest
+mismatch stops resume before any new output is written.
+
 ## Migration Scope
 
 ### PIPER generation and detection
@@ -265,6 +298,8 @@ provided.
 
 - Invalid batch or worker values fail during argument validation.
 - Engine/version or runtime mismatches fail before loading a model.
+- A v1 directory without `--import-v1-completed`, or a changed legacy artifact
+  after import, fails before loading a model.
 - CUDA OOM reports the configured and actual batch sizes and leaves already
   flushed records resumable only under the same configuration.
 - Shape mismatches identify the affected sample IDs.
@@ -304,12 +339,17 @@ provided.
 - Partial output resumes without duplicates or omissions.
 - Partial-batch resume regenerates the original batch and preserves its seed.
 - One failed row does not discard successful siblings in its detection task.
-- Legacy v1 directories are rejected with an actionable message.
+- Legacy v1 directories without the explicit import flag are rejected with an
+  actionable message.
+- Explicit v1 import freezes valid completed keys and schedules only missing
+  generation/detection work.
+- Hybrid summaries report v1/v2 composition for every run point and text class.
 
 ## Documentation and Rollout
 
 Update `README.md`, `PAPER_EXPERIMENTS.md`, and `experiments/README.md` with the
-three options and the v1/v2 resume boundary. Existing running v1 jobs continue
-unchanged because Python processes have already loaded their modules. New v2
-formal experiments use new output directories; no existing formal result is
-rewritten in place.
+three options, the pure-v2 resume boundary, and the explicit hybrid import
+command. Existing running v1 jobs continue unchanged because Python processes
+have already loaded their modules. New formal experiments use pure-v2 output
+directories. Interrupted v1 formal experiments may use the explicit migration
+path; no existing completed result is rewritten in place.
