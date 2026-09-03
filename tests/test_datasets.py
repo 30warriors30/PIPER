@@ -72,3 +72,27 @@ def test_load_samples_streams_past_requested_completed_target(tmp_path: Path) ->
     )
 
     assert [sample.sample_id for sample in load_samples(config)] == ["0", "1", "2"]
+
+
+def test_load_samples_accepts_jsonl_records_with_json_suffix(tmp_path: Path) -> None:
+    path = tmp_path / "processed_c4.json"
+    path.write_text(
+        "".join(
+            json.dumps({"prompt": f"p{index}", "natural_text": "a b c"}) + "\n"
+            for index in range(2)
+        ),
+        encoding="utf-8",
+    )
+    config = DatasetConfig(
+        kind="c4",
+        path=str(path),
+        prompt_field="prompt",
+        completion_field="natural_text",
+    )
+
+    samples = list(load_samples(config))
+
+    assert [(sample.prompt, sample.natural_completion) for sample in samples] == [
+        ("p0", "a b c"),
+        ("p1", "a b c"),
+    ]

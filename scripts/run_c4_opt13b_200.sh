@@ -5,6 +5,7 @@ PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 MODEL_PATH="${MODEL_PATH:-/data/yanlu/BREW/models/facebook/opt-1.3b}"
 RUN_ID="${RUN_ID:-c4_opt13b_piper_200}"
 SECRET_KEY="${SECRET_KEY:-dual-layer-key-2026}"
+BATCH_SIZE="${BATCH_SIZE:-16}"
 
 cd "$PROJECT_ROOT"
 export PYTHONNOUSERSITE=1
@@ -20,6 +21,7 @@ python run_generation.py \
   --streaming \
   --max-samples 200 \
   --max-new-tokens 200 \
+  --generation-batch-size "$BATCH_SIZE" \
   --presence-mode soft \
   --delta-presence 0 \
   --delta-payload 2 \

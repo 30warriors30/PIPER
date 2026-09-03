@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import time
 from pathlib import Path
 from typing import Any
 
@@ -9,7 +8,11 @@ from tqdm import tqdm
 
 from experiments.config import OperatingPoint, ParetoExperimentConfig
 from experiments.manifest import load_manifest, manifest_path
-from utils.generation import paired_rng
+from utils.batched_generation import (
+    GeneratedSequence,
+    adaptive_batches,
+    generate_exact_batch,
+)
 from utils.io import append_jsonl, iter_jsonl, write_json
 from utils.model import excluded_token_ids, load_model_and_tokenizer
 from watermark.config import ModelConfig
@@ -28,8 +31,14 @@ class ExperimentGenerator:
         model: Any | None = None,
         tokenizer: Any | None = None,
         device: torch.device | None = None,
+        batch_size: int | None = None,
     ) -> None:
         self.config = config
+        if batch_size is None:
+            batch_size = int(getattr(config, "generation_batch_size", 16))
+        if batch_size <= 0:
+            raise ValueError("batch_size must be positive")
+        self.batch_size = int(batch_size)
         if model is None or tokenizer is None or device is None:
             loaded_model, loaded_tokenizer, loaded_device = load_model_and_tokenizer(
                 ModelConfig(
@@ -46,76 +55,72 @@ class ExperimentGenerator:
             self.model = model
             self.tokenizer = tokenizer
             self.device = device
-        self.vocab_size = int(getattr(self.model.config, "vocab_size", len(self.tokenizer)))
+        self.vocab_size = int(
+            getattr(self.model.config, "vocab_size", len(self.tokenizer))
+        )
         self.excluded_ids = excluded_token_ids(
             self.tokenizer,
             exclude_special_tokens=True,
             exclude_eos=False,
         )
 
-    def _kwargs(self, processor: Any | None) -> dict[str, Any]:
-        kwargs: dict[str, Any] = {
-            "min_new_tokens": self.config.exact_tokens,
-            "max_new_tokens": self.config.exact_tokens,
-            "do_sample": True,
-            "temperature": self.config.temperature,
-            "top_p": self.config.top_p,
-            "pad_token_id": getattr(self.tokenizer, "pad_token_id", None),
-            "eos_token_id": getattr(self.tokenizer, "eos_token_id", None),
-        }
-        if processor is not None:
-            try:
-                from transformers import LogitsProcessorList
-
-                kwargs["logits_processor"] = LogitsProcessorList([processor])
-            except ImportError:
-                kwargs["logits_processor"] = [processor]
-        return {key: value for key, value in kwargs.items() if value is not None}
-
-    def _generate(
+    def _generate_batch(
         self,
-        prompt_ids: list[int] | tuple[int, ...],
-        seed: int,
+        rows: list[dict[str, Any]] | tuple[dict[str, Any], ...],
         processor: Any | None,
-    ) -> tuple[tuple[int, ...], str, float]:
-        input_ids = torch.tensor([list(prompt_ids)], dtype=torch.long, device=self.device)
-        attention_mask = torch.ones_like(input_ids)
-        kwargs = self._kwargs(processor)
-        kwargs["attention_mask"] = attention_mask
-        started = time.perf_counter()
-        with paired_rng(seed, self.device), torch.inference_mode():
-            output = self.model.generate(input_ids=input_ids, **kwargs)
-        elapsed = time.perf_counter() - started
-        if not isinstance(output, torch.Tensor):
-            output = output.sequences
-        continuation = tuple(int(value) for value in output[0, input_ids.shape[1] :].tolist())
-        if len(continuation) != self.config.exact_tokens:
-            raise RuntimeError(
-                f"Exact-length invariant failed: got {len(continuation)}, "
-                f"expected {self.config.exact_tokens}"
-            )
-        return continuation, self.tokenizer.decode(continuation, skip_special_tokens=True), elapsed
+    ) -> tuple[GeneratedSequence, ...]:
+        return generate_exact_batch(
+            model=self.model,
+            tokenizer=self.tokenizer,
+            device=self.device,
+            prompt_token_ids=[row["prompt_token_ids"] for row in rows],
+            seeds=[int(row["generation_seed"]) for row in rows],
+            exact_tokens=self.config.exact_tokens,
+            temperature=self.config.temperature,
+            top_p=self.config.top_p,
+            processor=processor,
+        )
 
-    def generate_unwatermarked(self, row: dict[str, Any]) -> tuple[tuple[int, ...], str, float]:
-        return self._generate(row["prompt_token_ids"], int(row["generation_seed"]), None)
-
-    def generate_watermarked(
+    def generate_unwatermarked_batch(
         self,
-        row: dict[str, Any],
+        rows: list[dict[str, Any]] | tuple[dict[str, Any], ...],
+    ) -> tuple[GeneratedSequence, ...]:
+        return self._generate_batch(rows, None)
+
+    def generate_watermarked_batch(
+        self,
+        rows: list[dict[str, Any]] | tuple[dict[str, Any], ...],
         point: OperatingPoint,
-    ) -> tuple[tuple[int, ...], str, float]:
+    ) -> tuple[GeneratedSequence, ...]:
         processor = DualLayerLogitsProcessor(
             secret_key=self.config.secret_key.encode("utf-8"),
             context_width=self.config.context_width,
-            encoded_bits=_bits(str(row["encoded_bits"])),
+            encoded_bits_by_row=tuple(_bits(str(row["encoded_bits"])) for row in rows),
             vocab_size=self.vocab_size,
             excluded_token_ids=self.excluded_ids,
             presence_mode=point.presence_mode,
             delta_presence=point.delta_presence,
             delta_payload=point.delta_payload,
             prf_mode=self.config.prf_mode,
+            # Detection and existing resumable artifacts still use the v1 partition.
+            partition_engine="v1",
+            capture_traces=False,
         )
-        return self._generate(row["prompt_token_ids"], int(row["generation_seed"]), processor)
+        return self._generate_batch(rows, processor)
+
+    def generate_unwatermarked(
+        self, row: dict[str, Any]
+    ) -> tuple[tuple[int, ...], str, float]:
+        result = self.generate_unwatermarked_batch((row,))[0]
+        return result.token_ids, result.text, result.seconds
+
+    def generate_watermarked(
+        self,
+        row: dict[str, Any],
+        point: OperatingPoint,
+    ) -> tuple[tuple[int, ...], str, float]:
+        result = self.generate_watermarked_batch((row,), point)[0]
+        return result.token_ids, result.text, result.seconds
 
 
 def _completed_ids(path: Path) -> set[str]:
@@ -132,7 +137,9 @@ def _prepare_output(path: Path, *, resume: bool, overwrite: bool) -> set[str]:
     if overwrite and path.exists():
         path.unlink()
     if path.exists() and path.stat().st_size and not resume and not overwrite:
-        raise FileExistsError(f"Output exists: {path}. Use resume=True or overwrite=True.")
+        raise FileExistsError(
+            f"Output exists: {path}. Use resume=True or overwrite=True."
+        )
     path.parent.mkdir(parents=True, exist_ok=True)
     path.touch(exist_ok=True)
     return _completed_ids(path) if resume else set()
@@ -147,35 +154,44 @@ def run_shared_baseline(
 ) -> dict[str, int]:
     output = config.experiment_dir / "shared" / "baseline.jsonl"
     completed = _prepare_output(output, resume=resume, overwrite=overwrite)
-    processed = skipped = 0
-    for row in tqdm(load_manifest(manifest_path(config)), desc="Shared baseline", unit="sample"):
-        sample_id = str(row["sample_id"])
-        if sample_id in completed:
-            skipped += 1
-            continue
-        ids, text, elapsed = generator.generate_unwatermarked(row)
-        natural_ids = tuple(int(value) for value in row["natural_token_ids"])
-        if len(natural_ids) != config.exact_tokens:
-            raise RuntimeError("Manifest natural continuation is not exact length")
-        append_jsonl(
-            output,
-            {
-                "schema_version": 1,
-                "sample_id": sample_id,
-                "split": row["split"],
-                "status": "completed",
-                "prompt_token_ids": row["prompt_token_ids"],
-                "message_bits": row["message_bits"],
-                "encoded_bits": row["encoded_bits"],
-                "generation_seed": row["generation_seed"],
-                "unwatermarked_text": text,
-                "unwatermarked_token_ids": list(ids),
-                "unwatermarked_generation_seconds": elapsed,
-                "natural_text": row.get("natural_text", ""),
-                "natural_token_ids": list(natural_ids),
-            },
-        )
-        processed += 1
+    rows = load_manifest(manifest_path(config))
+    pending = [row for row in rows if str(row["sample_id"]) not in completed]
+    skipped = len(rows) - len(pending)
+    processed = 0
+    progress = tqdm(total=len(pending), desc="Shared baseline", unit="sample")
+    for batch in adaptive_batches(
+        pending,
+        batch_size=generator.batch_size,
+        run=generator.generate_unwatermarked_batch,
+    ):
+        for row, result in zip(batch.items, batch.results, strict=True):
+            sample_id = str(row["sample_id"])
+            natural_ids = tuple(int(value) for value in row["natural_token_ids"])
+            if len(natural_ids) != config.exact_tokens:
+                raise RuntimeError("Manifest natural continuation is not exact length")
+            append_jsonl(
+                output,
+                {
+                    "schema_version": 1,
+                    "sample_id": sample_id,
+                    "split": row["split"],
+                    "status": "completed",
+                    "prompt_token_ids": row["prompt_token_ids"],
+                    "message_bits": row["message_bits"],
+                    "encoded_bits": row["encoded_bits"],
+                    "generation_seed": row["generation_seed"],
+                    "generation_batch_size_configured": generator.batch_size,
+                    "generation_batch_size_actual": result.batch_size,
+                    "unwatermarked_text": result.text,
+                    "unwatermarked_token_ids": list(result.token_ids),
+                    "unwatermarked_generation_seconds": result.seconds,
+                    "natural_text": row.get("natural_text", ""),
+                    "natural_token_ids": list(natural_ids),
+                },
+            )
+            processed += 1
+        progress.update(batch.batch_size)
+    progress.close()
     return {"processed": processed, "skipped": skipped}
 
 
@@ -191,30 +207,39 @@ def run_operating_point_generation(
     output = run_dir / "watermarked.jsonl"
     completed = _prepare_output(output, resume=resume, overwrite=overwrite)
     write_json(run_dir / "operating_point.json", point.to_dict())
-    processed = skipped = 0
-    rows = [row for row in load_manifest(manifest_path(config)) if row["split"] == "test"]
-    for row in tqdm(rows, desc=point.point_id, unit="sample"):
-        sample_id = str(row["sample_id"])
-        if sample_id in completed:
-            skipped += 1
-            continue
-        ids, text, elapsed = generator.generate_watermarked(row, point)
-        append_jsonl(
-            output,
-            {
-                "schema_version": 1,
-                "sample_id": sample_id,
-                "split": "test",
-                "status": "completed",
-                "prompt_token_ids": row["prompt_token_ids"],
-                "message_bits": row["message_bits"],
-                "encoded_bits": row["encoded_bits"],
-                "generation_seed": row["generation_seed"],
-                "operating_point": point.to_dict(),
-                "watermarked_text": text,
-                "watermarked_token_ids": list(ids),
-                "watermarked_generation_seconds": elapsed,
-            },
-        )
-        processed += 1
+    rows = [
+        row for row in load_manifest(manifest_path(config)) if row["split"] == "test"
+    ]
+    pending = [row for row in rows if str(row["sample_id"]) not in completed]
+    skipped = len(rows) - len(pending)
+    processed = 0
+    progress = tqdm(total=len(pending), desc=point.point_id, unit="sample")
+    for batch in adaptive_batches(
+        pending,
+        batch_size=generator.batch_size,
+        run=lambda chunk: generator.generate_watermarked_batch(tuple(chunk), point),
+    ):
+        for row, result in zip(batch.items, batch.results, strict=True):
+            append_jsonl(
+                output,
+                {
+                    "schema_version": 1,
+                    "sample_id": str(row["sample_id"]),
+                    "split": "test",
+                    "status": "completed",
+                    "prompt_token_ids": row["prompt_token_ids"],
+                    "message_bits": row["message_bits"],
+                    "encoded_bits": row["encoded_bits"],
+                    "generation_seed": row["generation_seed"],
+                    "generation_batch_size_configured": generator.batch_size,
+                    "generation_batch_size_actual": result.batch_size,
+                    "operating_point": point.to_dict(),
+                    "watermarked_text": result.text,
+                    "watermarked_token_ids": list(result.token_ids),
+                    "watermarked_generation_seconds": result.seconds,
+                },
+            )
+            processed += 1
+        progress.update(batch.batch_size)
+    progress.close()
     return {"processed": processed, "skipped": skipped}

@@ -8,11 +8,13 @@ import pytest
 
 from experiments.run_length_sweep import (
     DEFAULT_T_VALUES,
+    _dataset_config,
     aggregate_length_results,
     build_parser,
     parse_t_values,
     run_id,
 )
+from utils.datasets import load_samples
 from utils.io import write_json
 
 
@@ -48,6 +50,29 @@ def test_build_parser_defaults_match_length_sweep_design():
     assert args.ecc_n == 23
     assert args.ecc_k == 8
     assert args.ecc_t == 3
+
+
+def test_length_sweep_reads_processed_c4_natural_text(tmp_path: Path):
+    dataset_path = tmp_path / "processed_c4.json"
+    dataset_path.write_text(
+        json.dumps({"prompt": "prompt text", "natural_text": "natural continuation"}) + "\n",
+        encoding="utf-8",
+    )
+    args = build_parser().parse_args(
+        [
+            "--model-path",
+            "/data/yanlu/BREW/models/facebook/opt-1.3b",
+            "--secret-key",
+            "dual-layer-key-2026",
+            "--dataset-path",
+            str(dataset_path),
+        ]
+    )
+
+    sample = next(load_samples(_dataset_config(args)))
+
+    assert sample.prompt == "prompt text"
+    assert sample.natural_completion == "natural continuation"
 
 
 def test_run_id_names_one_directory_per_text_length():

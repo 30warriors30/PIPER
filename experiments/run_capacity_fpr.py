@@ -24,7 +24,7 @@ from scipy.stats import norm
 from tqdm import tqdm
 
 from utils.datasets import SampleFilterError, load_samples, prepare_sample
-from utils.generation import paired_rng
+from utils.batched_generation import adaptive_batches, generate_exact_batch
 from utils.io import append_jsonl, iter_jsonl, read_json, write_json
 from utils.model import excluded_token_ids, load_model_and_tokenizer, model_max_length
 from utils.seeds import derive_seed, message_bits
@@ -140,11 +140,19 @@ def summarize_capacity_records(
         tie_zero_bits = _decode_bits(row.get("tie_zero"))
         error_erasure_bits = _decode_bits(row.get("error_erasure"))
 
-        strict_exact += int(expected_message is not None and strict_bits == expected_message)
-        hard_fill_exact += int(expected_message is not None and hard_fill_bits == expected_message)
-        tie_is_exact = expected_message is not None and tie_zero_bits == expected_message
+        strict_exact += int(
+            expected_message is not None and strict_bits == expected_message
+        )
+        hard_fill_exact += int(
+            expected_message is not None and hard_fill_bits == expected_message
+        )
+        tie_is_exact = (
+            expected_message is not None and tie_zero_bits == expected_message
+        )
         tie_zero_exact += int(tie_is_exact)
-        ee_is_exact = expected_message is not None and error_erasure_bits == expected_message
+        ee_is_exact = (
+            expected_message is not None and error_erasure_bits == expected_message
+        )
         error_erasure_exact += int(ee_is_exact)
         detected_count += int(bool(row.get("detected", False)))
         correct_attribution += int(bool(row.get("detected", False)) and tie_is_exact)
@@ -165,7 +173,11 @@ def summarize_capacity_records(
         erased = {int(index) for index in (row.get("erasure_positions") or [])}
         erasure_counts.append(len(erased))
 
-        if expected_code is None or len(n0) != len(expected_code) or len(n1) != len(expected_code):
+        if (
+            expected_code is None
+            or len(n0) != len(expected_code)
+            or len(n1) != len(expected_code)
+        ):
             continue
         total_code_bits += len(expected_code)
         raw_erased += len(erased)
@@ -197,7 +209,9 @@ def summarize_capacity_records(
         "conditional_decoding_accuracy": None
         if detected_count == 0
         else correct_attribution / detected_count,
-        "end_to_end_exact_recovery": None if count == 0 else correct_attribution / count,
+        "end_to_end_exact_recovery": None
+        if count == 0
+        else correct_attribution / count,
         "wrong_message_rate": None if count == 0 else tie_zero_wrong / count,
         "abstention_rate": None if count == 0 else tie_zero_abstain / count,
         "error_erasure_wrong_message_rate": None
@@ -208,7 +222,9 @@ def summarize_capacity_records(
         else error_erasure_abstain / count,
         "mean_erasures": None if not erasure_counts else float(np.mean(erasure_counts)),
         "raw_decided_bit_ber": None if raw_decided == 0 else raw_errors / raw_decided,
-        "raw_erasure_rate": None if total_code_bits == 0 else raw_erased / total_code_bits,
+        "raw_erasure_rate": None
+        if total_code_bits == 0
+        else raw_erased / total_code_bits,
         "goodput_bits_per_token": None
         if tie_zero_rate is None
         else float(capacity_bits) * tie_zero_rate / float(exact_tokens),
@@ -262,9 +278,9 @@ def _experiment_metadata(args: argparse.Namespace) -> dict[str, Any]:
         "dataset_split": args.dataset_split,
         "dataset_path": args.dataset_path,
         "sample_offset": args.sample_offset,
-        "secret_key_fingerprint": __import__("hashlib").sha256(
-            args.secret_key.encode("utf-8")
-        ).hexdigest()[:16],
+        "secret_key_fingerprint": __import__("hashlib")
+        .sha256(args.secret_key.encode("utf-8"))
+        .hexdigest()[:16],
     }
 
 
@@ -278,11 +294,15 @@ def _prepare_root(args: argparse.Namespace) -> Path:
     metadata_path = root / "experiment.json"
     if root.exists() and any(root.iterdir()):
         if not args.resume:
-            raise FileExistsError(f"Output directory exists: {root}. Use --resume or --overwrite.")
+            raise FileExistsError(
+                f"Output directory exists: {root}. Use --resume or --overwrite."
+            )
         if not metadata_path.exists():
             raise ValueError(f"Cannot resume {root}: experiment.json is missing")
         if read_json(metadata_path) != metadata:
-            raise ValueError("Resume parameters do not match the existing experiment metadata")
+            raise ValueError(
+                "Resume parameters do not match the existing experiment metadata"
+            )
     root.mkdir(parents=True, exist_ok=True)
     if not metadata_path.exists():
         write_json(metadata_path, metadata)
@@ -306,7 +326,9 @@ def _completed_negative_keys(path: Path) -> set[tuple[str, str]]:
 
 
 def _load_completed(path: Path) -> list[dict[str, Any]]:
-    return [row for row in iter_jsonl(path) if row.get("status", "completed") == "completed"]
+    return [
+        row for row in iter_jsonl(path) if row.get("status", "completed") == "completed"
+    ]
 
 
 def build_shared_manifest(
@@ -384,7 +406,9 @@ def build_shared_manifest(
     return rows[: args.test_samples]
 
 
-def _generation_kwargs(args: argparse.Namespace, tokenizer: Any, processor: Any | None) -> dict[str, Any]:
+def _generation_kwargs(
+    args: argparse.Namespace, tokenizer: Any, processor: Any | None
+) -> dict[str, Any]:
     kwargs: dict[str, Any] = {
         "min_new_tokens": EXACT_TOKENS,
         "max_new_tokens": EXACT_TOKENS,
@@ -414,22 +438,18 @@ def _generate_exact(
     args: argparse.Namespace,
     processor: Any | None,
 ) -> tuple[tuple[int, ...], str, float]:
-    input_ids = torch.tensor([list(prompt_ids)], dtype=torch.long, device=device)
-    attention_mask = torch.ones_like(input_ids)
-    kwargs = _generation_kwargs(args, tokenizer, processor)
-    kwargs["attention_mask"] = attention_mask
-    started = time.perf_counter()
-    with paired_rng(int(seed), device), torch.inference_mode():
-        output = model.generate(input_ids=input_ids, **kwargs)
-    elapsed = time.perf_counter() - started
-    if not isinstance(output, torch.Tensor):
-        output = output.sequences
-    continuation = tuple(int(value) for value in output[0, input_ids.shape[1] :].tolist())
-    if len(continuation) != EXACT_TOKENS:
-        raise RuntimeError(
-            f"Exact-length invariant failed: got {len(continuation)}, expected {EXACT_TOKENS}"
-        )
-    return continuation, tokenizer.decode(continuation, skip_special_tokens=True), elapsed
+    result = generate_exact_batch(
+        model=model,
+        tokenizer=tokenizer,
+        device=device,
+        prompt_token_ids=(prompt_ids,),
+        seeds=(int(seed),),
+        exact_tokens=EXACT_TOKENS,
+        temperature=args.temperature,
+        top_p=args.top_p,
+        processor=processor,
+    )[0]
+    return result.token_ids, result.text, result.seconds
 
 
 def generate_shared_baseline(
@@ -443,38 +463,48 @@ def generate_shared_baseline(
 ) -> list[dict[str, Any]]:
     path = root / "shared" / "baseline.jsonl"
     completed = _completed_ids(path)
-    for row in tqdm(manifest, desc="Shared 500-token baseline", unit="sample"):
-        sample_id = str(row["sample_id"])
-        if sample_id in completed:
-            continue
-        ids, text, elapsed = _generate_exact(
+    pending = [row for row in manifest if str(row["sample_id"]) not in completed]
+    progress = tqdm(total=len(pending), desc="Shared 500-token baseline", unit="sample")
+    for batch in adaptive_batches(
+        pending,
+        batch_size=args.generation_batch_size,
+        run=lambda chunk: generate_exact_batch(
             model=model,
             tokenizer=tokenizer,
             device=device,
-            prompt_ids=row["prompt_token_ids"],
-            seed=int(row["generation_seed"]),
-            args=args,
+            prompt_token_ids=[row["prompt_token_ids"] for row in chunk],
+            seeds=[int(row["generation_seed"]) for row in chunk],
+            exact_tokens=EXACT_TOKENS,
+            temperature=args.temperature,
+            top_p=args.top_p,
             processor=None,
-        )
-        natural_ids = tuple(int(value) for value in row["natural_token_ids"])
-        if len(natural_ids) != EXACT_TOKENS:
-            raise RuntimeError("Natural continuation is not exactly 500 tokens")
-        append_jsonl(
-            path,
-            {
-                "schema_version": 1,
-                "sample_id": sample_id,
-                "status": "completed",
-                "prompt_token_ids": row["prompt_token_ids"],
-                "generation_seed": int(row["generation_seed"]),
-                "unwatermarked_token_ids": list(ids),
-                "unwatermarked_text": text,
-                "unwatermarked_generation_seconds": elapsed,
-                "natural_token_ids": list(natural_ids),
-                "natural_text": row["natural_text"],
-            },
-        )
-        completed.add(sample_id)
+        ),
+    ):
+        for row, result in zip(batch.items, batch.results, strict=True):
+            sample_id = str(row["sample_id"])
+            natural_ids = tuple(int(value) for value in row["natural_token_ids"])
+            if len(natural_ids) != EXACT_TOKENS:
+                raise RuntimeError("Natural continuation is not exactly 500 tokens")
+            append_jsonl(
+                path,
+                {
+                    "schema_version": 1,
+                    "sample_id": sample_id,
+                    "status": "completed",
+                    "prompt_token_ids": row["prompt_token_ids"],
+                    "generation_seed": int(row["generation_seed"]),
+                    "generation_batch_size_configured": args.generation_batch_size,
+                    "generation_batch_size_actual": result.batch_size,
+                    "unwatermarked_token_ids": list(result.token_ids),
+                    "unwatermarked_text": result.text,
+                    "unwatermarked_generation_seconds": result.seconds,
+                    "natural_token_ids": list(natural_ids),
+                    "natural_text": row["natural_text"],
+                },
+            )
+            completed.add(sample_id)
+        progress.update(batch.batch_size)
+    progress.close()
     return _load_completed(path)
 
 
@@ -563,7 +593,9 @@ def detect_shared_negatives(
         vocab_size=vocab_size,
         codec=BCHCodec(n, k, t),
     )
-    progress = tqdm(total=len(baseline) * 2, desc="Shared negative detection", unit="result")
+    progress = tqdm(
+        total=len(baseline) * 2, desc="Shared negative detection", unit="result"
+    )
     for row in baseline:
         sample_id = str(row["sample_id"])
         for text_class, field in (
@@ -624,7 +656,9 @@ def _watermarked_detection_record(
         "encoded_bits": "".join(map(str, encoded)),
         "strict": asdict(result.strict_decode),
         "hard_fill": asdict(result.hard_fill_decode),
-        "tie_zero": None if result.tie_zero_decode is None else asdict(result.tie_zero_decode),
+        "tie_zero": None
+        if result.tie_zero_decode is None
+        else asdict(result.tie_zero_decode),
         "error_erasure": asdict(result.error_erasure_decode),
         "gated_message_bits": None
         if result.gated_message_bits is None
@@ -654,50 +688,72 @@ def generate_capacity_point(
     generation_path = run_dir / "watermarked.jsonl"
     completed = _completed_ids(generation_path)
 
-    for row in tqdm(manifest, desc=f"Generate b={capacity_bits}", unit="sample"):
+    pending = []
+    for row in manifest:
         sample_id = str(row["sample_id"])
         if sample_id in completed:
             continue
         message = message_bits(args.message_seed, sample_id, k)
-        encoded = codec.encode(message)
+        pending.append((row, message, codec.encode(message)))
+
+    def generate_batch(chunk):
         processor = DualLayerLogitsProcessor(
             secret_key=args.secret_key.encode("utf-8"),
             context_width=args.context_width,
-            encoded_bits=encoded,
+            encoded_bits_by_row=tuple(encoded for _, _, encoded in chunk),
             vocab_size=vocab_size,
             excluded_token_ids=excluded_ids,
             presence_mode="soft",
             delta_presence=DELTA_PRESENCE,
             delta_payload=DELTA_PAYLOAD,
             prf_mode="paper_shared",
+            # Detection and existing resumable artifacts still use the v1 partition.
+            partition_engine="v1",
+            capture_traces=False,
         )
-        ids, text, elapsed = _generate_exact(
+        return generate_exact_batch(
             model=model,
             tokenizer=tokenizer,
             device=device,
-            prompt_ids=row["prompt_token_ids"],
-            seed=int(row["generation_seed"]),
-            args=args,
+            prompt_token_ids=[row["prompt_token_ids"] for row, _, _ in chunk],
+            seeds=[int(row["generation_seed"]) for row, _, _ in chunk],
+            exact_tokens=EXACT_TOKENS,
+            temperature=args.temperature,
+            top_p=args.top_p,
             processor=processor,
         )
-        append_jsonl(
-            generation_path,
-            {
-                "schema_version": 1,
-                "sample_id": sample_id,
-                "status": "completed",
-                "capacity_bits": capacity_bits,
-                "ecc": {"n": n, "k": k, "t": t},
-                "prompt_token_ids": row["prompt_token_ids"],
-                "generation_seed": int(row["generation_seed"]),
-                "message_bits": "".join(map(str, message)),
-                "encoded_bits": "".join(map(str, encoded)),
-                "watermarked_token_ids": list(ids),
-                "watermarked_text": text,
-                "generation_seconds": elapsed,
-            },
-        )
-        completed.add(sample_id)
+
+    progress = tqdm(
+        total=len(pending), desc=f"Generate b={capacity_bits}", unit="sample"
+    )
+    for batch in adaptive_batches(
+        pending, batch_size=args.generation_batch_size, run=generate_batch
+    ):
+        for item, result in zip(batch.items, batch.results, strict=True):
+            row, message, encoded = item
+            sample_id = str(row["sample_id"])
+            append_jsonl(
+                generation_path,
+                {
+                    "schema_version": 1,
+                    "sample_id": sample_id,
+                    "status": "completed",
+                    "capacity_bits": capacity_bits,
+                    "ecc": {"n": n, "k": k, "t": t},
+                    "prompt_token_ids": row["prompt_token_ids"],
+                    "generation_seed": int(row["generation_seed"]),
+                    "generation_batch_size_configured": args.generation_batch_size,
+                    "generation_batch_size_actual": result.batch_size,
+                    "message_bits": "".join(map(str, message)),
+                    "encoded_bits": "".join(map(str, encoded)),
+                    "watermarked_token_ids": list(result.token_ids),
+                    "watermarked_text": result.text,
+                    "generation_seconds": result.seconds,
+                },
+            )
+            completed.add(sample_id)
+        progress.update(batch.batch_size)
+    progress.close()
     return _load_completed(generation_path)
 
 
@@ -787,7 +843,10 @@ def _plot_metric(
     capacities = [int(row["capacity_bits"]) for row in rows]
     figure, axis = plt.subplots(figsize=(7.0, 4.8))
     for field, label in fields:
-        values = [float(row[field]) if row.get(field) is not None else math.nan for row in rows]
+        values = [
+            float(row[field]) if row.get(field) is not None else math.nan
+            for row in rows
+        ]
         axis.plot(capacities, values, marker="o", label=label)
     axis.set_xlabel("Raw payload capacity b (bits)")
     axis.set_ylabel(ylabel)
@@ -854,7 +913,10 @@ def aggregate_results(root: Path, capacities: Iterable[int]) -> list[dict[str, A
     figures = root / "figures"
     _plot_metric(
         rows,
-        fields=[("model_fpr", "Model-generated negatives"), ("natural_fpr", "Natural negatives")],
+        fields=[
+            ("model_fpr", "Model-generated negatives"),
+            ("natural_fpr", "Natural negatives"),
+        ],
         ylabel="Observed false positive rate",
         path=figures / "capacity_vs_fpr.png",
     )
@@ -898,9 +960,17 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--context-width", type=int, default=CONTEXT_WIDTH)
     parser.add_argument("--temperature", type=float, default=TEMPERATURE)
     parser.add_argument("--top-p", type=float, default=TOP_P)
+    parser.add_argument(
+        "--generation-batch-size",
+        type=int,
+        default=16,
+        help="Initial generation batch size; CUDA OOM automatically halves it.",
+    )
     parser.add_argument("--global-seed", type=int, default=GLOBAL_SEED)
     parser.add_argument("--message-seed", type=int, default=MESSAGE_SEED)
-    parser.add_argument("--max-erasure-assignments", type=int, default=MAX_ERASURE_ASSIGNMENTS)
+    parser.add_argument(
+        "--max-erasure-assignments", type=int, default=MAX_ERASURE_ASSIGNMENTS
+    )
     parser.add_argument("--device", default="cuda")
     parser.add_argument(
         "--dtype",
@@ -925,6 +995,8 @@ def _validate_args(args: argparse.Namespace) -> None:
         raise ValueError("--test-samples must be positive")
     if args.context_width <= 0:
         raise ValueError("--context-width must be positive")
+    if args.generation_batch_size <= 0:
+        raise ValueError("--generation-batch-size must be positive")
     if args.max_erasure_assignments <= 0:
         raise ValueError("--max-erasure-assignments must be positive")
     theoretical_threshold(args.target_fpr)
@@ -965,6 +1037,7 @@ def main(argv: list[str] | None = None) -> int:
     print(f"counting mode:   {COUNTING_MODE}")
     print(f"decoder:         {PRIMARY_POLICY}")
     print(f"test samples:    {args.test_samples}")
+    print(f"generation batch:{args.generation_batch_size} (automatic CUDA OOM backoff)")
     print(f"output:          {root}")
     print("=" * 72)
 

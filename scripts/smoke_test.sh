@@ -15,6 +15,7 @@ python run_generation.py \
   --dataset c4 \
   --max-samples 3 \
   --max-new-tokens 32 \
+  --generation-batch-size 3 \
   --presence-mode soft \
   --delta-presence 0 \
   --delta-payload 2 \

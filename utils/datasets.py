@@ -46,7 +46,16 @@ def _local_rows(config: DatasetConfig) -> Iterable[dict[str, Any]]:
     path = Path(config.path)
     if not path.exists():
         raise FileNotFoundError(path)
-    if path.suffix.lower() == ".jsonl" or config.kind == "jsonl":
+    is_jsonl = path.suffix.lower() == ".jsonl" or config.kind == "jsonl"
+    if not is_jsonl:
+        with path.open("r", encoding="utf-8") as handle:
+            while character := handle.read(1):
+                if not character.isspace():
+                    # Some legacy datasets use a .json suffix for JSONL data.
+                    is_jsonl = character != "["
+                    break
+
+    if is_jsonl:
 
         def rows() -> Iterator[dict[str, Any]]:
             with path.open("r", encoding="utf-8") as handle:

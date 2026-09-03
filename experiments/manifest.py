@@ -30,6 +30,7 @@ def _dataset_config(config: ParetoExperimentConfig) -> DatasetConfig:
         max_samples=config.total_manifest_samples,
         sample_offset=config.sample_offset,
         path=config.dataset_path,
+        completion_field="natural_text",
         id_field="id",
     )
 

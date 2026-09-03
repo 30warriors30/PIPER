@@ -11,7 +11,9 @@ from pathlib import Path
 from typing import Any, Iterable, Sequence
 
 _process_identity = getattr(os, "getuid", os.getpid)()
-_MPLCONFIGDIR = Path(os.environ.get("TEMP", "/tmp")) / f"piper-matplotlib-{_process_identity}"
+_MPLCONFIGDIR = (
+    Path(os.environ.get("TEMP", "/tmp")) / f"piper-matplotlib-{_process_identity}"
+)
 _MPLCONFIGDIR.mkdir(parents=True, exist_ok=True)
 os.environ.setdefault("MPLCONFIGDIR", str(_MPLCONFIGDIR))
 if __package__ in {None, ""}:
@@ -48,7 +50,7 @@ from experiments.run_capacity_fpr import (
     theoretical_threshold,
 )
 from utils.datasets import SampleFilterError, load_samples, prepare_sample
-from utils.generation import paired_rng
+from utils.batched_generation import adaptive_batches, generate_exact_batch
 from utils.io import append_jsonl, iter_jsonl, read_json, write_json
 from utils.model import excluded_token_ids, load_model_and_tokenizer, model_max_length
 from utils.seeds import derive_seed, message_bits
@@ -88,6 +90,7 @@ def _dataset_config(args: argparse.Namespace) -> DatasetConfig:
         max_samples=args.test_samples,
         sample_offset=args.sample_offset,
         path=args.dataset_path,
+        completion_field="natural_text",
         id_field="id",
     )
 
@@ -102,7 +105,9 @@ def _ecc_shape(args: argparse.Namespace) -> tuple[int, int, int]:
     return actual
 
 
-def _experiment_metadata(args: argparse.Namespace, t_values: Sequence[int]) -> dict[str, Any]:
+def _experiment_metadata(
+    args: argparse.Namespace, t_values: Sequence[int]
+) -> dict[str, Any]:
     n, k, t = _ecc_shape(args)
     return {
         "schema_version": 1,
@@ -132,9 +137,9 @@ def _experiment_metadata(args: argparse.Namespace, t_values: Sequence[int]) -> d
         "dataset_split": args.dataset_split,
         "dataset_path": args.dataset_path,
         "sample_offset": args.sample_offset,
-        "secret_key_fingerprint": __import__("hashlib").sha256(
-            args.secret_key.encode("utf-8")
-        ).hexdigest()[:16],
+        "secret_key_fingerprint": __import__("hashlib")
+        .sha256(args.secret_key.encode("utf-8"))
+        .hexdigest()[:16],
     }
 
 
@@ -148,11 +153,15 @@ def _prepare_root(args: argparse.Namespace, t_values: Sequence[int]) -> Path:
     metadata_path = root / "experiment.json"
     if root.exists() and any(root.iterdir()):
         if not args.resume:
-            raise FileExistsError(f"Output directory exists: {root}. Use --resume or --overwrite.")
+            raise FileExistsError(
+                f"Output directory exists: {root}. Use --resume or --overwrite."
+            )
         if not metadata_path.exists():
             raise ValueError(f"Cannot resume {root}: experiment.json is missing")
         if read_json(metadata_path) != metadata:
-            raise ValueError("Resume parameters do not match the existing experiment metadata")
+            raise ValueError(
+                "Resume parameters do not match the existing experiment metadata"
+            )
     root.mkdir(parents=True, exist_ok=True)
     if not metadata_path.exists():
         write_json(metadata_path, metadata)
@@ -272,22 +281,18 @@ def _generate_exact(
     processor: Any | None,
     exact_tokens: int,
 ) -> tuple[tuple[int, ...], str, float]:
-    input_ids = torch.tensor([list(prompt_ids)], dtype=torch.long, device=device)
-    attention_mask = torch.ones_like(input_ids)
-    kwargs = _generation_kwargs(args, tokenizer, processor, exact_tokens=exact_tokens)
-    kwargs["attention_mask"] = attention_mask
-    started = time.perf_counter()
-    with paired_rng(int(seed), device), torch.inference_mode():
-        output = model.generate(input_ids=input_ids, **kwargs)
-    elapsed = time.perf_counter() - started
-    if not isinstance(output, torch.Tensor):
-        output = output.sequences
-    continuation = tuple(int(value) for value in output[0, input_ids.shape[1] :].tolist())
-    if len(continuation) != int(exact_tokens):
-        raise RuntimeError(
-            f"Exact-length invariant failed: got {len(continuation)}, expected {exact_tokens}"
-        )
-    return continuation, tokenizer.decode(continuation, skip_special_tokens=True), elapsed
+    result = generate_exact_batch(
+        model=model,
+        tokenizer=tokenizer,
+        device=device,
+        prompt_token_ids=(prompt_ids,),
+        seeds=(int(seed),),
+        exact_tokens=exact_tokens,
+        temperature=args.temperature,
+        top_p=args.top_p,
+        processor=processor,
+    )[0]
+    return result.token_ids, result.text, result.seconds
 
 
 def generate_shared_baseline(
@@ -303,40 +308,57 @@ def generate_shared_baseline(
 ) -> list[dict[str, Any]]:
     path = root / "runs" / run_id(exact_tokens, capacity_bits) / "baseline.jsonl"
     completed = _completed_ids(path)
-    for row in tqdm(manifest, desc=f"Shared baseline T={exact_tokens}", unit="sample"):
-        sample_id = str(row["sample_id"])
-        if sample_id in completed:
-            continue
-        ids, text, elapsed = _generate_exact(
+    pending = [row for row in manifest if str(row["sample_id"]) not in completed]
+    progress = tqdm(
+        total=len(pending), desc=f"Shared baseline T={exact_tokens}", unit="sample"
+    )
+    for batch in adaptive_batches(
+        pending,
+        batch_size=args.generation_batch_size,
+        run=lambda chunk: generate_exact_batch(
             model=model,
             tokenizer=tokenizer,
             device=device,
-            prompt_ids=row["prompt_token_ids"],
-            seed=int(row["generation_seed"]),
-            args=args,
-            processor=None,
+            prompt_token_ids=[row["prompt_token_ids"] for row in chunk],
+            seeds=[int(row["generation_seed"]) for row in chunk],
             exact_tokens=exact_tokens,
-        )
-        natural_ids = tuple(int(value) for value in row["natural_token_ids"][:exact_tokens])
-        if len(natural_ids) != int(exact_tokens):
-            raise RuntimeError(f"Natural continuation has fewer than {exact_tokens} tokens")
-        append_jsonl(
-            path,
-            {
-                "schema_version": 1,
-                "sample_id": sample_id,
-                "status": "completed",
-                "exact_tokens": int(exact_tokens),
-                "prompt_token_ids": row["prompt_token_ids"],
-                "generation_seed": int(row["generation_seed"]),
-                "unwatermarked_token_ids": list(ids),
-                "unwatermarked_text": text,
-                "unwatermarked_generation_seconds": elapsed,
-                "natural_token_ids": list(natural_ids),
-                "natural_text": tokenizer.decode(natural_ids, skip_special_tokens=True),
-            },
-        )
-        completed.add(sample_id)
+            temperature=args.temperature,
+            top_p=args.top_p,
+            processor=None,
+        ),
+    ):
+        for row, result in zip(batch.items, batch.results, strict=True):
+            sample_id = str(row["sample_id"])
+            natural_ids = tuple(
+                int(value) for value in row["natural_token_ids"][:exact_tokens]
+            )
+            if len(natural_ids) != int(exact_tokens):
+                raise RuntimeError(
+                    f"Natural continuation has fewer than {exact_tokens} tokens"
+                )
+            append_jsonl(
+                path,
+                {
+                    "schema_version": 1,
+                    "sample_id": sample_id,
+                    "status": "completed",
+                    "exact_tokens": int(exact_tokens),
+                    "prompt_token_ids": row["prompt_token_ids"],
+                    "generation_seed": int(row["generation_seed"]),
+                    "generation_batch_size_configured": args.generation_batch_size,
+                    "generation_batch_size_actual": result.batch_size,
+                    "unwatermarked_token_ids": list(result.token_ids),
+                    "unwatermarked_text": result.text,
+                    "unwatermarked_generation_seconds": result.seconds,
+                    "natural_token_ids": list(natural_ids),
+                    "natural_text": tokenizer.decode(
+                        natural_ids, skip_special_tokens=True
+                    ),
+                },
+            )
+            completed.add(sample_id)
+        progress.update(batch.batch_size)
+    progress.close()
     return _load_completed(path)
 
 
@@ -350,7 +372,12 @@ def detect_shared_negatives(
     tokenizer: Any,
     vocab_size: int,
 ) -> list[dict[str, Any]]:
-    path = root / "runs" / run_id(exact_tokens, capacity_bits) / "negative_detections.jsonl"
+    path = (
+        root
+        / "runs"
+        / run_id(exact_tokens, capacity_bits)
+        / "negative_detections.jsonl"
+    )
     completed = _completed_negative_keys(path)
     n, k, t = _ecc_shape(args)
     detector = _build_detector(
@@ -359,7 +386,11 @@ def detect_shared_negatives(
         vocab_size=vocab_size,
         codec=BCHCodec(n, k, t),
     )
-    progress = tqdm(total=len(baseline) * 2, desc=f"Negative detection T={exact_tokens}", unit="result")
+    progress = tqdm(
+        total=len(baseline) * 2,
+        desc=f"Negative detection T={exact_tokens}",
+        unit="result",
+    )
     for row in baseline:
         sample_id = str(row["sample_id"])
         for text_class, field in (
@@ -407,52 +438,73 @@ def generate_length_point(
     generation_path = run_dir / "watermarked.jsonl"
     completed = _completed_ids(generation_path)
 
-    for row in tqdm(manifest, desc=f"Generate T={exact_tokens}", unit="sample"):
+    pending = []
+    for row in manifest:
         sample_id = str(row["sample_id"])
         if sample_id in completed:
             continue
         message = message_bits(args.message_seed, sample_id, k)
-        encoded = codec.encode(message)
+        pending.append((row, message, codec.encode(message)))
+
+    def generate_batch(chunk):
         processor = DualLayerLogitsProcessor(
             secret_key=args.secret_key.encode("utf-8"),
             context_width=args.context_width,
-            encoded_bits=encoded,
+            encoded_bits_by_row=tuple(encoded for _, _, encoded in chunk),
             vocab_size=vocab_size,
             excluded_token_ids=excluded_ids,
             presence_mode="soft",
             delta_presence=args.delta_presence,
             delta_payload=args.delta_payload,
             prf_mode="paper_shared",
+            # Detection and existing resumable artifacts still use the v1 partition.
+            partition_engine="v1",
+            capture_traces=False,
         )
-        ids, text, elapsed = _generate_exact(
+        return generate_exact_batch(
             model=model,
             tokenizer=tokenizer,
             device=device,
-            prompt_ids=row["prompt_token_ids"],
-            seed=int(row["generation_seed"]),
-            args=args,
-            processor=processor,
+            prompt_token_ids=[row["prompt_token_ids"] for row, _, _ in chunk],
+            seeds=[int(row["generation_seed"]) for row, _, _ in chunk],
             exact_tokens=exact_tokens,
+            temperature=args.temperature,
+            top_p=args.top_p,
+            processor=processor,
         )
-        append_jsonl(
-            generation_path,
-            {
-                "schema_version": 1,
-                "sample_id": sample_id,
-                "status": "completed",
-                "exact_tokens": int(exact_tokens),
-                "capacity_bits": capacity_bits,
-                "ecc": {"n": n, "k": k, "t": t},
-                "prompt_token_ids": row["prompt_token_ids"],
-                "generation_seed": int(row["generation_seed"]),
-                "message_bits": "".join(map(str, message)),
-                "encoded_bits": "".join(map(str, encoded)),
-                "watermarked_token_ids": list(ids),
-                "watermarked_text": text,
-                "generation_seconds": elapsed,
-            },
-        )
-        completed.add(sample_id)
+
+    progress = tqdm(
+        total=len(pending), desc=f"Generate T={exact_tokens}", unit="sample"
+    )
+    for batch in adaptive_batches(
+        pending, batch_size=args.generation_batch_size, run=generate_batch
+    ):
+        for item, result in zip(batch.items, batch.results, strict=True):
+            row, message, encoded = item
+            sample_id = str(row["sample_id"])
+            append_jsonl(
+                generation_path,
+                {
+                    "schema_version": 1,
+                    "sample_id": sample_id,
+                    "status": "completed",
+                    "exact_tokens": int(exact_tokens),
+                    "capacity_bits": capacity_bits,
+                    "ecc": {"n": n, "k": k, "t": t},
+                    "prompt_token_ids": row["prompt_token_ids"],
+                    "generation_seed": int(row["generation_seed"]),
+                    "generation_batch_size_configured": args.generation_batch_size,
+                    "generation_batch_size_actual": result.batch_size,
+                    "message_bits": "".join(map(str, message)),
+                    "encoded_bits": "".join(map(str, encoded)),
+                    "watermarked_token_ids": list(result.token_ids),
+                    "watermarked_text": result.text,
+                    "generation_seconds": result.seconds,
+                },
+            )
+            completed.add(sample_id)
+        progress.update(batch.batch_size)
+    progress.close()
     return _load_completed(generation_path)
 
 
@@ -541,7 +593,9 @@ def write_length_metrics(
             "combined_fpr": _combined_fpr(metrics),
         }
     )
-    write_json(root / "runs" / run_id(exact_tokens, capacity_bits) / "metrics.json", metrics)
+    write_json(
+        root / "runs" / run_id(exact_tokens, capacity_bits) / "metrics.json", metrics
+    )
     return metrics
 
 
@@ -555,7 +609,10 @@ def _plot_metric(
     x_values = [int(row["exact_tokens"]) for row in rows]
     figure, axis = plt.subplots(figsize=(7.0, 4.8))
     for field, label in fields:
-        values = [float(row[field]) if row.get(field) is not None else math.nan for row in rows]
+        values = [
+            float(row[field]) if row.get(field) is not None else math.nan
+            for row in rows
+        ]
         axis.plot(x_values, values, marker="o", label=label)
     axis.set_xlabel("T")
     axis.set_ylabel(ylabel)
@@ -629,7 +686,11 @@ def aggregate_length_results(
     figures = root / "figures"
     _plot_metric(
         rows,
-        fields=[("model_fpr", "Model-generated"), ("natural_fpr", "Natural"), ("combined_fpr", "Combined")],
+        fields=[
+            ("model_fpr", "Model-generated"),
+            ("natural_fpr", "Natural"),
+            ("combined_fpr", "Combined"),
+        ],
         ylabel="Observed false positive rate",
         path=figures / "length_vs_fpr.png",
     )
@@ -660,7 +721,9 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--model-path", required=True)
     parser.add_argument("--secret-key", required=True)
-    parser.add_argument("--output-dir", default="outputs/experiments/length_sweep_b8_m2")
+    parser.add_argument(
+        "--output-dir", default="outputs/experiments/length_sweep_b8_m2"
+    )
     parser.add_argument("--test-samples", type=int, default=DEFAULT_TEST_SAMPLES)
     parser.add_argument("--t-values", nargs="+")
     parser.add_argument("--b", type=int, default=8, choices=sorted(SUPPORTED_BCH))
@@ -673,11 +736,21 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--context-width", type=int, default=CONTEXT_WIDTH)
     parser.add_argument("--temperature", type=float, default=TEMPERATURE)
     parser.add_argument("--top-p", type=float, default=TOP_P)
+    parser.add_argument(
+        "--generation-batch-size",
+        type=int,
+        default=16,
+        help="Initial generation batch size; CUDA OOM automatically halves it.",
+    )
     parser.add_argument("--global-seed", type=int, default=GLOBAL_SEED)
     parser.add_argument("--message-seed", type=int, default=MESSAGE_SEED)
-    parser.add_argument("--max-erasure-assignments", type=int, default=MAX_ERASURE_ASSIGNMENTS)
+    parser.add_argument(
+        "--max-erasure-assignments", type=int, default=MAX_ERASURE_ASSIGNMENTS
+    )
     parser.add_argument("--device", default="cuda")
-    parser.add_argument("--dtype", default="float16", choices=["float16", "bfloat16", "float32", "auto"])
+    parser.add_argument(
+        "--dtype", default="float16", choices=["float16", "bfloat16", "float32", "auto"]
+    )
     parser.add_argument("--dataset-path")
     parser.add_argument("--dataset-name", default="allenai/c4")
     parser.add_argument("--dataset-config", default="realnewslike")
@@ -697,6 +770,8 @@ def _validate_args(args: argparse.Namespace, t_values: Sequence[int]) -> None:
         raise ValueError("--test-samples must be positive")
     if args.context_width <= 0:
         raise ValueError("--context-width must be positive")
+    if args.generation_batch_size <= 0:
+        raise ValueError("--generation-batch-size must be positive")
     if args.max_erasure_assignments <= 0:
         raise ValueError("--max-erasure-assignments must be positive")
     if float(args.delta_presence) != 0.0:
@@ -723,6 +798,9 @@ def _print_plan(args: argparse.Namespace, t_values: Sequence[int], root: Path) -
     print(f"counting mode:    {COUNTING_MODE}")
     print(f"decoder:          {PRIMARY_POLICY}")
     print(f"test samples:     {args.test_samples}")
+    print(
+        f"generation batch: {args.generation_batch_size} (automatic CUDA OOM backoff)"
+    )
     print(f"output:           {root}")
     print("=" * 72)
 
