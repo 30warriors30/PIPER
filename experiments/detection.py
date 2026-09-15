@@ -7,6 +7,7 @@ from typing import Any, Callable
 
 from experiments.calibration import calibrate_threshold_from_scores
 from experiments.config import OperatingPoint, ParetoExperimentConfig
+from experiments.manifest import selected_test_sample_ids
 from utils.detection import build_detector, detection_record, load_tokenizer
 from utils.io import append_jsonl, iter_jsonl, read_json, write_json
 from watermark.config import (
@@ -276,9 +277,12 @@ def run_operating_point_detection(
     run_dir = config.experiment_dir / "runs" / point.point_id
     output = run_dir / "watermarked_detections.jsonl"
     completed = _prepare(output, resume=resume, overwrite=overwrite)
+    selected_ids = selected_test_sample_ids(config)
     processed = skipped = 0
     for row in iter_jsonl(run_dir / "watermarked.jsonl"):
         sample_id = str(row["sample_id"])
+        if sample_id not in selected_ids:
+            continue
         prompt_ids = [int(value) for value in row["prompt_token_ids"]]
         token_ids = [int(value) for value in row["watermarked_token_ids"]]
         for result, elapsed in _detect_modes(detector, prompt_ids, token_ids):

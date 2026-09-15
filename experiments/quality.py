@@ -9,6 +9,7 @@ import torch
 from tqdm import tqdm
 
 from experiments.config import OperatingPoint, ParetoExperimentConfig
+from experiments.manifest import selected_test_sample_ids
 from utils.io import append_jsonl, iter_jsonl, write_json
 from utils.model import load_model_and_tokenizer
 from watermark.config import ModelConfig
@@ -180,8 +181,14 @@ def score_operating_point_quality(
     run_dir = config.experiment_dir / "runs" / point.point_id
     output = run_dir / "quality.jsonl"
     completed = _prepare(output, resume=resume, overwrite=overwrite)
+    selected_ids = selected_test_sample_ids(config)
     processed = skipped = 0
-    for row in tqdm(list(iter_jsonl(run_dir / "watermarked.jsonl")), desc=f"Quality {point.point_id}", unit="sample"):
+    rows = [
+        row
+        for row in iter_jsonl(run_dir / "watermarked.jsonl")
+        if str(row["sample_id"]) in selected_ids
+    ]
+    for row in tqdm(rows, desc=f"Quality {point.point_id}", unit="sample"):
         key = (str(row["sample_id"]), "watermarked")
         if key in completed:
             skipped += 1
@@ -206,6 +213,8 @@ def score_operating_point_quality(
         )
         processed += 1
     shared = list(iter_jsonl(config.experiment_dir / "shared" / "quality.jsonl"))
-    point_rows = list(iter_jsonl(output))
+    point_rows = [
+        row for row in iter_jsonl(output) if str(row["sample_id"]) in selected_ids
+    ]
     write_json(run_dir / "quality_summary.json", quality_summary(shared + point_rows))
     return {"processed": processed, "skipped": skipped}

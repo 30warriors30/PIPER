@@ -20,6 +20,18 @@ def load_manifest(path: Path) -> list[dict[str, Any]]:
     return [record for record in iter_jsonl(path) if record.get("status", "completed") == "completed"]
 
 
+def load_selected_test_rows(config: ParetoExperimentConfig) -> list[dict[str, Any]]:
+    """Return the manifest-ordered positive test subset for watermark evaluation."""
+    rows = [
+        row for row in load_manifest(manifest_path(config)) if row["split"] == "test"
+    ]
+    return rows[: config.watermarked_test_samples]
+
+
+def selected_test_sample_ids(config: ParetoExperimentConfig) -> set[str]:
+    return {str(row["sample_id"]) for row in load_selected_test_rows(config)}
+
+
 def _dataset_config(config: ParetoExperimentConfig) -> DatasetConfig:
     return DatasetConfig(
         kind="c4",

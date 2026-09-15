@@ -4,13 +4,16 @@ import sys
 from pathlib import Path
 
 import pytest
+import torch
 
 from experiments.mpac_comparison import (
+    PerRowMPACLogitsProcessor,
     build_parser,
     embedded_message_length,
     embedded_payload_bits,
     empirical_threshold,
     evaluate_payload_prediction,
+    generate_mpac_watermarked_batch,
     import_mpac,
     load_manifest_rows,
     mpac_digits_from_bits,
@@ -93,7 +96,169 @@ def test_build_parser_defaults_match_mpac_baseline():
     assert args.seeding_scheme == "lefthash"
     assert args.target_fpr == 0.01
     assert args.mpac_ecc == "none"
+    assert args.generation_batch_size == 1
     assert embedded_message_length(args) == 8
+
+
+def test_validate_runtime_args_rejects_nonpositive_generation_batch_size():
+    args = build_parser().parse_args(
+        [
+            "--experiment-dir",
+            "outputs/experiments/opt13b_pareto_49x200",
+            "--mb-repo",
+            "/tmp/mb-lm-watermarking",
+            "--output-dir",
+            "outputs/baselines/mpac",
+            "--model-path",
+            "/data/yanlu/BREW/models/facebook/opt-1.3b",
+            "--device",
+            "cpu",
+            "--generation-batch-size",
+            "0",
+        ]
+    )
+
+    with pytest.raises(ValueError, match="generation-batch-size must be positive"):
+        validate_runtime_args(args)
+
+
+def test_per_row_processor_keeps_payload_state_separate():
+    class RowProcessor:
+        def __init__(self, offset):
+            self.offset = offset
+            self.seen = []
+
+        def __call__(self, input_ids, scores):
+            self.seen.append(input_ids.tolist())
+            return scores + self.offset
+
+    first = RowProcessor(10.0)
+    second = RowProcessor(20.0)
+    processor = PerRowMPACLogitsProcessor([first, second])
+
+    output = processor(
+        torch.tensor([[1, 2], [3, 4]], dtype=torch.long),
+        torch.zeros((2, 3), dtype=torch.float32),
+    )
+
+    assert output.tolist() == [[10.0, 10.0, 10.0], [20.0, 20.0, 20.0]]
+    assert first.seen == [[[1, 2]]]
+    assert second.seen == [[[3, 4]]]
+
+
+def test_generate_mpac_watermarked_batch_batches_model_and_preserves_rows():
+    from types import SimpleNamespace
+
+    class FakeModel:
+        def __init__(self):
+            self.config = SimpleNamespace(vocab_size=12, is_encoder_decoder=False)
+            self.forward_batch_sizes = []
+
+        def __call__(
+            self,
+            *,
+            input_ids,
+            attention_mask,
+            past_key_values=None,
+            use_cache,
+            return_dict,
+        ):
+            del attention_mask, use_cache, return_dict
+            self.forward_batch_sizes.append(int(input_ids.shape[0]))
+            batch, length = input_ids.shape
+            logits = torch.arange(12, dtype=torch.float32).repeat(batch, length, 1)
+            return SimpleNamespace(logits=logits, past_key_values=(past_key_values, length))
+
+    class FakeTokenizer:
+        vocab_size = 10
+        pad_token_id = 0
+        eos_token_id = 1
+
+        def get_vocab(self):
+            return {str(index): index for index in range(self.vocab_size)}
+
+        def decode(self, ids, skip_special_tokens=True):
+            del skip_special_tokens
+            return " ".join(str(int(value)) for value in ids)
+
+    class FakeMPACProcessor:
+        def __init__(self, **kwargs):
+            del kwargs
+            self.message = None
+            self.positions = []
+            self.position_increment = 0
+
+        def set_message(self, message):
+            self.message = message
+
+        def __call__(self, input_ids, scores):
+            del input_ids
+            self.positions.append(self.message[-1])
+            return scores
+
+        def flush_position(self):
+            positions = "".join(self.positions)
+            self.positions = []
+            return [positions]
+
+    args = build_parser().parse_args(
+        [
+            "--experiment-dir",
+            "experiment",
+            "--mb-repo",
+            "mpac",
+            "--output-dir",
+            "output",
+            "--model-path",
+            "model",
+            "--device",
+            "cpu",
+            "--dtype",
+            "float32",
+            "--exact-tokens",
+            "3",
+            "--top-p",
+            "1.0",
+            "--generation-batch-size",
+            "2",
+        ]
+    )
+    rows = [
+        {
+            "sample_id": "a",
+            "split": "test",
+            "message_bits": "00000000",
+            "generation_seed": 10,
+            "prompt_token_ids": [2, 3],
+        },
+        {
+            "sample_id": "b",
+            "split": "test",
+            "message_bits": "00000001",
+            "generation_seed": 20,
+            "prompt_token_ids": [4, 5, 6],
+        },
+    ]
+    model = FakeModel()
+
+    generated = generate_mpac_watermarked_batch(
+        rows,
+        args=args,
+        model=model,
+        tokenizer=FakeTokenizer(),
+        device=torch.device("cpu"),
+        processor_cls=FakeMPACProcessor,
+    )
+
+    assert [row["sample_id"] for row in generated] == ["a", "b"]
+    assert [row["embedded_message_bits"] for row in generated] == [
+        "00000000",
+        "00000001",
+    ]
+    assert [row["sampled_positions"] for row in generated] == ["000", "111"]
+    assert all(len(row["token_ids"]) == 3 for row in generated)
+    assert all(row["generation_batch_size"] == 2 for row in generated)
+    assert model.forward_batch_sizes == [2, 2, 2]
 
 
 def test_root_wrapper_exposes_mpac_comparison_module():
@@ -109,6 +274,7 @@ def test_root_wrapper_exposes_mpac_comparison_module():
 
     assert completed.returncode == 0, completed.stderr
     assert "--mpac-ecc {none,bch23}" in completed.stdout
+    assert "--generation-batch-size GENERATION_BATCH_SIZE" in completed.stdout
 
 
 def test_root_wrapper_does_not_shadow_project_package_imports():

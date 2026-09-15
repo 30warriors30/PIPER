@@ -27,7 +27,9 @@ conda activate dual-watermark-blackwell
 export PYTHONNOUSERSITE=1
 
 MODEL=/data/yanlu/BREW/models/facebook/opt-1.3b
-C4=/data/yanlu/BREW/dataset/c4/processed_c4.json
+PPL_MODEL=/data1/yanlu/models/facebook/opt-6.7b
+C4=/data/yanlu/BREW/dataset/c4/c4_realnewslike_validation_t300_6000.jsonl.gz
+MPAC_REPO=/data/yanlu/BREW/PIPER/experiments/Comparative/MPAC
 KEY=dual-layer-key-2026
 BATCH_SIZE=${BATCH_SIZE:-16}
 ```
@@ -85,18 +87,32 @@ Smoke test 只用于工程验收，不放入论文表格。
 python -m experiments.run_pareto_sweep \
   --model-path "$MODEL" --secret-key "$KEY" \
   --experiment-id piper_main_t300_b8_selfhash_top50 --preset paper \
-  --calibration-samples 1000 --test-samples 1000 \
+  --calibration-samples 1000 --test-samples 5000 --limit-test 1000 \
   --exact-tokens 300 --context-width 4 \
   --ecc-n 23 --ecc-k 8 --ecc-t 3 \
   --candidate-top-k 50 --seeding-scheme selfhash --partition-engine v2 \
   --temperature 1.0 --top-k 50 --top-p 0.95 \
-  --presence-test exact_binomial \
+  --presence-test exact_binomial --target-fpr 0.01 \
   --generation-batch-size "$BATCH_SIZE" \
   --counting-mode unique_context --dataset-path "$C4" \
+  --global-seed 42 --message-seed 42 \
+  --device cuda --dtype float16 \
   --only-point soft_p0_m2 --stage all --overwrite
 ```
 
 主结果读取 `runs/soft_p0_m2/metrics.json`。headline 使用 `blind_text`；`known_boundary` 只作为附录上界。
+
+该命令建立同一个 `1000 calibration + 5000 test` manifest。完整 5000 条 test rows 用于 Model-null 与 Natural-null FPR；按 manifest 顺序取前 1000 条 test rows 生成水印文本，用于 H1 的 TPR、CAR、CDA、EMR 和 PPL。中断续跑时把最后的 `--overwrite` 改为 `--resume`，不得同时使用二者。
+
+独立 OPT-6.7B 质量评估复用已经生成的文本，不重新采样：
+
+```bash
+python -m experiments.evaluate_external_ppl \
+  --experiment-dir outputs/experiments/piper_main_t300_b8_selfhash_top50 \
+  --evaluator-model "$PPL_MODEL" --evaluator-name opt-6.7b \
+  --only-point soft_p0_m2 --batch-size 8 \
+  --device cuda --dtype float16 --overwrite
+```
 
 该 exact-binomial 主路径不会计算、写入或读取 Z-score 校准阈值。`--calibration-samples` 保留独立样本，供 Z-score 消融和需要经验阈值的对比方法使用；它们不参与 PIPER 主判定。
 
@@ -411,10 +427,22 @@ python -m experiments.attack.run_paraphrase_attacks \
 ```bash
 python -m experiments.mpac_comparison \
   --experiment-dir outputs/experiments/piper_main_t300_b8_selfhash_top50 \
-  --mb-repo /data/repos/mb-lm-watermarking \
-  --output-dir outputs/baselines/mpac --model-path "$MODEL" \
+  --mb-repo "$MPAC_REPO" \
+  --output-dir outputs/baselines/mpac_t300_b8_bch23_selfhash_shared_manifest \
+  --model-path "$MODEL" \
   --brew-point-id soft_p0_m2 --exact-tokens 300 \
-  --message-length 8 --target-fpr 0.01 --overwrite
+  --message-length 8 --mpac-ecc bch23 \
+  --base 4 --gamma 0.25 --delta 2.0 \
+  --seeding-scheme selfhash --ignore-repeated-ngrams \
+  --temperature 1.0 --top-p 0.95 \
+  --target-fpr 0.01 --limit-test 1000 \
+  --generation-batch-size "$BATCH_SIZE" \
+  --device cuda --dtype float16 --local-files-only --overwrite
+
+python -m experiments.evaluate_mpac_ppl \
+  --comparison-dir outputs/baselines/mpac_t300_b8_bch23_selfhash_shared_manifest \
+  --evaluator-model "$PPL_MODEL" --evaluator-name opt-6.7b \
+  --batch-size 8 --device cuda --dtype float16 --overwrite
 
 python -m experiments.segment_rsbh_comparison \
   --experiment-dir outputs/experiments/piper_main_t300_b8_selfhash_top50 \

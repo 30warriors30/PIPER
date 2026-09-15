@@ -8,6 +8,7 @@ import numpy as np
 from evaluation.metrics import evaluate_records
 from experiments.config import OperatingPoint, ParetoExperimentConfig
 from experiments.detection import load_shared_z_threshold
+from experiments.manifest import selected_test_sample_ids
 from experiments.quality import quality_summary
 from utils.io import iter_jsonl, write_json
 
@@ -86,6 +87,7 @@ def compute_operating_point_metrics(
     *,
     input_mode: str = "known_boundary",
 ) -> dict[str, Any]:
+    selected_ids = selected_test_sample_ids(config)
     negative_records = [
         row
         for row in iter_jsonl(config.experiment_dir / "shared" / "negative_detections.jsonl")
@@ -96,7 +98,9 @@ def compute_operating_point_metrics(
         for row in iter_jsonl(
             config.experiment_dir / "runs" / point.point_id / "watermarked_detections.jsonl"
         )
-        if row.get("split", "test") == "test" and row.get("input_mode") == input_mode
+        if row.get("split", "test") == "test"
+        and row.get("input_mode") == input_mode
+        and str(row["sample_id"]) in selected_ids
     ]
     frozen_threshold = load_shared_z_threshold(config)
     if frozen_threshold is not None:
@@ -114,9 +118,13 @@ def compute_operating_point_metrics(
         for row in iter_jsonl(config.experiment_dir / "shared" / "quality.jsonl")
         if row.get("split", "test") == "test"
     ]
-    point_quality = list(
-        iter_jsonl(config.experiment_dir / "runs" / point.point_id / "quality.jsonl")
-    )
+    point_quality = [
+        row
+        for row in iter_jsonl(
+            config.experiment_dir / "runs" / point.point_id / "quality.jsonl"
+        )
+        if str(row["sample_id"]) in selected_ids
+    ]
     result = {
         "schema_version": 1,
         "operating_point": point.to_dict(),

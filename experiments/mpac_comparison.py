@@ -14,7 +14,7 @@ from typing import Any, Iterable, Sequence
 import torch
 from tqdm import tqdm
 
-from utils.generation import paired_rng
+from utils.batched_generation import adaptive_batches, generate_exact_batch
 from watermark.ecc import BCHCodec
 
 
@@ -140,6 +140,8 @@ def embedded_payload_bits(message_bits: str, args: argparse.Namespace) -> str:
 
 
 def validate_runtime_args(args: argparse.Namespace) -> None:
+    if int(args.generation_batch_size) <= 0:
+        raise ValueError("--generation-batch-size must be positive")
     if str(args.device).startswith("cuda") and not torch.cuda.is_available():
         raise RuntimeError(
             "CUDA device requested, but no CUDA GPU is visible in this environment. "
@@ -392,22 +394,6 @@ def load_model_and_tokenizer(args: argparse.Namespace) -> tuple[Any, Any, torch.
     return model, tokenizer, device
 
 
-def _generation_kwargs(args: argparse.Namespace, tokenizer: Any, processor: Any) -> dict[str, Any]:
-    from transformers import LogitsProcessorList
-
-    kwargs: dict[str, Any] = {
-        "min_new_tokens": args.exact_tokens,
-        "max_new_tokens": args.exact_tokens,
-        "do_sample": True,
-        "temperature": args.temperature,
-        "top_p": args.top_p,
-        "pad_token_id": getattr(tokenizer, "pad_token_id", None),
-        "eos_token_id": getattr(tokenizer, "eos_token_id", None),
-        "logits_processor": LogitsProcessorList([processor]),
-    }
-    return {key: value for key, value in kwargs.items() if value is not None}
-
-
 def make_processor(args: argparse.Namespace, tokenizer: Any, cls: Any, device: torch.device) -> Any:
     message_length = embedded_message_length(args)
     return cls(
@@ -479,6 +465,102 @@ def score_text(
     }
 
 
+class PerRowMPACLogitsProcessor:
+    """Apply one independent stateful MPAC processor to each model-batch row."""
+
+    def __init__(self, processors: Sequence[Any]) -> None:
+        if not processors:
+            raise ValueError("processors must not be empty")
+        self.processors = tuple(processors)
+
+    def __call__(self, input_ids: torch.Tensor, scores: torch.Tensor) -> torch.Tensor:
+        if int(input_ids.shape[0]) != len(self.processors):
+            raise ValueError(
+                "MPAC processor count must match the model batch size: "
+                f"{len(self.processors)} != {int(input_ids.shape[0])}"
+            )
+        processed_rows = [
+            processor(
+                input_ids[index : index + 1],
+                scores[index : index + 1].clone(),
+            )
+            for index, processor in enumerate(self.processors)
+        ]
+        return torch.cat(processed_rows, dim=0)
+
+
+def generate_mpac_watermarked_batch(
+    rows: Sequence[dict[str, Any]],
+    *,
+    args: argparse.Namespace,
+    model: Any,
+    tokenizer: Any,
+    device: torch.device,
+    processor_cls: Any,
+) -> tuple[dict[str, Any], ...]:
+    if not rows:
+        return ()
+
+    processors = []
+    original_messages = []
+    embedded_messages = []
+    prompts = []
+    seeds = []
+    for row in rows:
+        processor = make_processor(args, tokenizer, processor_cls, device)
+        original_message = str(row["message_bits"])
+        embedded_message = embedded_payload_bits(original_message, args)
+        processor.set_message(embedded_message)
+        processors.append(processor)
+        original_messages.append(original_message)
+        embedded_messages.append(embedded_message)
+        prompts.append(tuple(int(value) for value in row["prompt_token_ids"]))
+        seeds.append(int(row["generation_seed"]))
+
+    generated = generate_exact_batch(
+        model=model,
+        tokenizer=tokenizer,
+        device=device,
+        prompt_token_ids=prompts,
+        seeds=seeds,
+        exact_tokens=int(args.exact_tokens),
+        temperature=float(args.temperature),
+        top_p=float(args.top_p),
+        processor=PerRowMPACLogitsProcessor(processors),
+        do_sample=True,
+    )
+
+    records = []
+    for row, original_message, embedded_message, processor, result in zip(
+        rows,
+        original_messages,
+        embedded_messages,
+        processors,
+        generated,
+        strict=True,
+    ):
+        sampled_positions = processor.flush_position()[0]
+        processor.position_increment = 0
+        records.append(
+            {
+                "sample_id": str(row["sample_id"]),
+                "split": str(row["split"]),
+                "text_class": "watermarked",
+                "message_bits": original_message,
+                "embedded_message_bits": embedded_message,
+                "mpac_ecc": args.mpac_ecc,
+                "generation_seed": int(row["generation_seed"]),
+                "prompt_token_ids": list(row["prompt_token_ids"]),
+                "token_ids": list(result.token_ids),
+                "text": result.text,
+                "sampled_positions": sampled_positions,
+                "generation_seconds": result.seconds,
+                "generation_batch_size": result.batch_size,
+            }
+        )
+    return tuple(records)
+
+
 def generate_mpac_watermarked(
     row: dict[str, Any],
     *,
@@ -488,42 +570,14 @@ def generate_mpac_watermarked(
     device: torch.device,
     processor_cls: Any,
 ) -> dict[str, Any]:
-    processor = make_processor(args, tokenizer, processor_cls, device)
-    original_message_bits = str(row["message_bits"])
-    embedded_bits = embedded_payload_bits(original_message_bits, args)
-    processor.set_message(embedded_bits)
-    input_ids = torch.tensor([list(row["prompt_token_ids"])], dtype=torch.long, device=device)
-    attention_mask = torch.ones_like(input_ids)
-    kwargs = _generation_kwargs(args, tokenizer, processor)
-    kwargs["attention_mask"] = attention_mask
-    started = time.perf_counter()
-    with paired_rng(int(row["generation_seed"]), device), torch.inference_mode():
-        output = model.generate(input_ids=input_ids, **kwargs)
-    elapsed = time.perf_counter() - started
-    if not isinstance(output, torch.Tensor):
-        output = output.sequences
-    continuation = [int(value) for value in output[0, input_ids.shape[1] :].tolist()]
-    if len(continuation) != args.exact_tokens:
-        raise RuntimeError(
-            f"Exact-length invariant failed for sample {row['sample_id']}: "
-            f"got {len(continuation)}, expected {args.exact_tokens}"
-        )
-    sampled_positions = processor.flush_position()[0]
-    processor.position_increment = 0
-    return {
-        "sample_id": str(row["sample_id"]),
-        "split": str(row["split"]),
-        "text_class": "watermarked",
-        "message_bits": original_message_bits,
-        "embedded_message_bits": embedded_bits,
-        "mpac_ecc": args.mpac_ecc,
-        "generation_seed": int(row["generation_seed"]),
-        "prompt_token_ids": list(row["prompt_token_ids"]),
-        "token_ids": continuation,
-        "text": tokenizer.decode(continuation, skip_special_tokens=True),
-        "sampled_positions": sampled_positions,
-        "generation_seconds": elapsed,
-    }
+    return generate_mpac_watermarked_batch(
+        [row],
+        args=args,
+        model=model,
+        tokenizer=tokenizer,
+        device=device,
+        processor_cls=processor_cls,
+    )[0]
 
 
 def _dummy_positions(token_ids: Sequence[int], context_width: int, self_salt: bool) -> str:
@@ -625,6 +679,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         "target_fpr": args.target_fpr,
         "mpac_ecc": args.mpac_ecc,
         "embedded_message_length": embedded_message_length(args),
+        "generation_batch_size_requested": args.generation_batch_size,
     }
     if args.mpac_ecc == "bch23":
         metadata.update({"ecc_n": 23, "ecc_k": 8, "ecc_t": 3})
@@ -641,29 +696,39 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         device=device,
     )
     test_rows = load_manifest_rows(experiment_dir / "manifest.jsonl", split="test", limit=args.limit_test)
-    for row in tqdm(test_rows, desc="Generate and score MPAC positives", unit="sample"):
-        generated = generate_mpac_watermarked(
-            row,
-            args=args,
-            model=model,
-            tokenizer=tokenizer,
-            device=device,
-            processor_cls=processor_cls,
-        )
-        score = score_text(
-            detector,
-            token_ids=generated["token_ids"],
-            message_bits=generated["embedded_message_bits"],
-            sampled_positions=generated["sampled_positions"],
-            device=device,
-        )
-        payload_eval = evaluate_payload_prediction(
-            pred_message=score["pred_message"],
-            original_message_bits=generated["message_bits"],
-            embedded_message_bits=generated["embedded_message_bits"],
-            args=args,
-        )
-        records.append({**generated, **score, **payload_eval})
+    with tqdm(
+        total=len(test_rows),
+        desc="Generate and score MPAC positives",
+        unit="sample",
+    ) as progress:
+        for completed in adaptive_batches(
+            test_rows,
+            batch_size=int(args.generation_batch_size),
+            run=lambda chunk: generate_mpac_watermarked_batch(
+                chunk,
+                args=args,
+                model=model,
+                tokenizer=tokenizer,
+                device=device,
+                processor_cls=processor_cls,
+            ),
+        ):
+            for generated in completed.results:
+                score = score_text(
+                    detector,
+                    token_ids=generated["token_ids"],
+                    message_bits=generated["embedded_message_bits"],
+                    sampled_positions=generated["sampled_positions"],
+                    device=device,
+                )
+                payload_eval = evaluate_payload_prediction(
+                    pred_message=score["pred_message"],
+                    original_message_bits=generated["message_bits"],
+                    embedded_message_bits=generated["embedded_message_bits"],
+                    args=args,
+                )
+                records.append({**generated, **score, **payload_eval})
+                progress.update(1)
 
     for record in records:
         append_jsonl(records_path, record)
@@ -686,7 +751,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Run MPAC on the existing BREW T=200 b=8 data.")
+    parser = argparse.ArgumentParser(description="Run MPAC on an existing PIPER comparison manifest.")
     parser.add_argument("--experiment-dir", required=True)
     parser.add_argument("--mb-repo", required=True)
     parser.add_argument("--output-dir", required=True)
@@ -707,6 +772,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--target-fpr", type=float, default=0.01)
     parser.add_argument("--device", default="cuda")
     parser.add_argument("--dtype", default="float16", choices=["float16", "bfloat16", "float32", "auto"])
+    parser.add_argument("--generation-batch-size", type=int, default=1)
     parser.add_argument("--local-files-only", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--limit-test", type=int, default=None)
     parser.add_argument("--overwrite", action="store_true")

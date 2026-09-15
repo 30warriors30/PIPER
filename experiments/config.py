@@ -46,6 +46,7 @@ class ParetoExperimentConfig:
     experiment_id: str
     calibration_samples: int = 200
     test_samples: int = 200
+    limit_test: int | None = None
     exact_tokens: int = 200
     context_width: int = 4
     temperature: float = 1.0
@@ -83,6 +84,11 @@ class ParetoExperimentConfig:
             raise ValueError("calibration_samples must be positive")
         if self.test_samples <= 0:
             raise ValueError("test_samples must be positive")
+        if self.limit_test is not None:
+            if self.limit_test <= 0:
+                raise ValueError("limit_test must be positive")
+            if self.limit_test > self.test_samples:
+                raise ValueError("limit_test must not exceed test_samples")
         if self.exact_tokens <= 0:
             raise ValueError("exact_tokens must be positive")
         if self.context_width <= 0:
@@ -118,6 +124,10 @@ class ParetoExperimentConfig:
     @property
     def total_manifest_samples(self) -> int:
         return self.calibration_samples + self.test_samples
+
+    @property
+    def watermarked_test_samples(self) -> int:
+        return self.test_samples if self.limit_test is None else self.limit_test
 
     def to_dict(self) -> dict[str, Any]:
         value = asdict(self)

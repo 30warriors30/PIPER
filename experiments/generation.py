@@ -7,7 +7,7 @@ import torch
 from tqdm import tqdm
 
 from experiments.config import OperatingPoint, ParetoExperimentConfig
-from experiments.manifest import load_manifest, manifest_path
+from experiments.manifest import load_manifest, load_selected_test_rows, manifest_path
 from utils.batched_generation import (
     GeneratedSequence,
     adaptive_batches,
@@ -209,9 +209,7 @@ def run_operating_point_generation(
     output = run_dir / "watermarked.jsonl"
     completed = _prepare_output(output, resume=resume, overwrite=overwrite)
     write_json(run_dir / "operating_point.json", point.to_dict())
-    rows = [
-        row for row in load_manifest(manifest_path(config)) if row["split"] == "test"
-    ]
+    rows = load_selected_test_rows(config)
     pending = [row for row in rows if str(row["sample_id"]) not in completed]
     skipped = len(rows) - len(pending)
     processed = 0

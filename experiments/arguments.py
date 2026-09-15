@@ -24,6 +24,15 @@ def experiment_parser(description: str = "Run dual-layer watermark Pareto experi
 
     parser.add_argument("--calibration-samples", type=int)
     parser.add_argument("--test-samples", type=int)
+    parser.add_argument(
+        "--limit-test",
+        type=int,
+        help=(
+            "Use only the first N test manifest rows for watermarked generation, "
+            "detection, quality, and TPR/payload metrics. Shared negative FPR "
+            "evaluation still uses all --test-samples rows."
+        ),
+    )
     parser.add_argument("--exact-tokens", type=int, default=200)
     parser.add_argument("--context-width", type=int, default=4)
     parser.add_argument("--temperature", type=float, default=1.0)
@@ -78,6 +87,7 @@ def config_from_args(args: argparse.Namespace) -> ParetoExperimentConfig:
         experiment_id=args.experiment_id,
         calibration_samples=calibration_samples,
         test_samples=test_samples,
+        limit_test=args.limit_test,
         exact_tokens=args.exact_tokens,
         context_width=args.context_width,
         temperature=args.temperature,
@@ -136,6 +146,7 @@ def print_plan(config: ParetoExperimentConfig, args: argparse.Namespace, points)
     print(f"Model:              {config.model_path}")
     print(f"Manifest samples:   {config.total_manifest_samples}")
     print(f"Calibration/test:   {config.calibration_samples} / {config.test_samples}")
+    print(f"Watermarked test:   {config.watermarked_test_samples}")
     print(f"Exact tokens:       {config.exact_tokens}")
     print(f"Partition seed:     {config.seeding_scheme}")
     print(f"Partition engine:   {config.partition_engine}")
