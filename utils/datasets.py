@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import gzip
 import json
 from dataclasses import dataclass, field, replace
 from pathlib import Path
@@ -46,9 +47,17 @@ def _local_rows(config: DatasetConfig) -> Iterable[dict[str, Any]]:
     path = Path(config.path)
     if not path.exists():
         raise FileNotFoundError(path)
-    is_jsonl = path.suffix.lower() == ".jsonl" or config.kind == "jsonl"
+    compressed = path.suffix.lower() == ".gz"
+    logical_name = path.name[:-3] if compressed else path.name
+    is_jsonl = logical_name.lower().endswith(".jsonl") or config.kind == "jsonl"
+
+    def open_text():
+        if compressed:
+            return gzip.open(path, "rt", encoding="utf-8")
+        return path.open("r", encoding="utf-8")
+
     if not is_jsonl:
-        with path.open("r", encoding="utf-8") as handle:
+        with open_text() as handle:
             while character := handle.read(1):
                 if not character.isspace():
                     # Some legacy datasets use a .json suffix for JSONL data.
@@ -58,7 +67,7 @@ def _local_rows(config: DatasetConfig) -> Iterable[dict[str, Any]]:
     if is_jsonl:
 
         def rows() -> Iterator[dict[str, Any]]:
-            with path.open("r", encoding="utf-8") as handle:
+            with open_text() as handle:
                 for line_number, line in enumerate(handle, start=1):
                     if not line.strip():
                         continue
@@ -68,7 +77,8 @@ def _local_rows(config: DatasetConfig) -> Iterable[dict[str, Any]]:
                     yield value
 
         return rows()
-    value = json.loads(path.read_text(encoding="utf-8"))
+    with open_text() as handle:
+        value = json.load(handle)
     if not isinstance(value, list) or any(not isinstance(row, dict) for row in value):
         raise ValueError("JSON dataset must be a list of objects")
     return value

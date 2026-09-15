@@ -1,3 +1,4 @@
+import gzip
 import json
 from pathlib import Path
 
@@ -95,4 +96,31 @@ def test_load_samples_accepts_jsonl_records_with_json_suffix(tmp_path: Path) -> 
     assert [(sample.prompt, sample.natural_completion) for sample in samples] == [
         ("p0", "a b c"),
         ("p1", "a b c"),
+    ]
+
+
+def test_load_samples_reads_gzipped_c4_jsonl(tmp_path: Path) -> None:
+    path = tmp_path / "c4-validation.jsonl.gz"
+    rows = [
+        {"id": "doc-1", "text": "first long document"},
+        {"id": "doc-2", "text": "second long document"},
+    ]
+    with gzip.open(path, "wt", encoding="utf-8") as handle:
+        for row in rows:
+            handle.write(json.dumps(row) + "\n")
+
+    samples = list(
+        load_samples(
+            DatasetConfig(
+                kind="c4",
+                path=str(path),
+                id_field="id",
+            )
+        )
+    )
+
+    assert [sample.sample_id for sample in samples] == ["doc-1", "doc-2"]
+    assert [sample.metadata["raw_text"] for sample in samples] == [
+        "first long document",
+        "second long document",
     ]
