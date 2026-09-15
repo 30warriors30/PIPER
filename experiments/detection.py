@@ -42,6 +42,7 @@ def _runtime_config(
             max_new_tokens=config.exact_tokens,
             temperature=config.temperature,
             top_p=config.top_p,
+            top_k=config.top_k,
             global_seed=config.global_seed,
             message_seed=config.message_seed,
         ),
@@ -53,6 +54,9 @@ def _runtime_config(
             delta_payload=0.0,
             prf_mode=config.prf_mode,
             allocation_mode=config.allocation_mode,
+            candidate_top_k=config.candidate_top_k,
+            seeding_scheme=config.seeding_scheme,
+            partition_engine=config.partition_engine,
         ),
         ecc=ECCConfig(n=config.ecc_n, k=config.ecc_k, t=config.ecc_t),
         detection=DetectionConfig(

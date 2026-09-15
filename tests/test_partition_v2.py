@@ -178,6 +178,36 @@ def test_eligible_id_tensor_is_reused_without_caching_regions() -> None:
     assert not torch.equal(first_regions, second_regions)
 
 
+def test_regions_for_tokens_support_candidate_specific_partition_keys() -> None:
+    partitioner = StatelessExactPartitioner(12, {0})
+    token_ids = torch.tensor([[1, 4, 9], [2, 5, 10]])
+    rows = token_ids.tolist()
+    round_keys_by_token = tuple(
+        tuple(partition_round_keys(seed + token_id) for token_id in row)
+        for seed, row in zip((10, 20), rows, strict=True)
+    )
+
+    regions = partitioner.regions_for_tokens(
+        round_keys_by_token=round_keys_by_token,
+        token_ids=token_ids,
+    )
+
+    assert regions.tolist() == [[0, 3, 3], [0, 2, 3]]
+
+
+def test_regions_for_tokens_marks_excluded_candidates_ineligible() -> None:
+    partitioner = StatelessExactPartitioner(12, {0})
+    token_ids = torch.tensor([[0, 1]])
+    round_keys_by_token = ((partition_round_keys(10), partition_round_keys(11)),)
+
+    regions = partitioner.regions_for_tokens(
+        round_keys_by_token=round_keys_by_token,
+        token_ids=token_ids,
+    )
+
+    assert regions.tolist() == [[-1, 0]]
+
+
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
 def test_cuda_regions_match_cpu_regions() -> None:
     partitioner = StatelessExactPartitioner(50272, {0, 1})

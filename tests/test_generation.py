@@ -50,16 +50,30 @@ class FakeModel:
     def __init__(self):
         self.config = SimpleNamespace(vocab_size=32, max_position_embeddings=128)
         self.generation_calls: list[dict[str, int]] = []
+        self.processor_configs: list[tuple[str, str, int | None]] = []
 
     def generate(self, input_ids, min_new_tokens, max_new_tokens, logits_processor=None, **kwargs):
         self.generation_calls.append(
             {"min_new_tokens": int(min_new_tokens), "max_new_tokens": int(max_new_tokens)}
         )
+        if logits_processor:
+            processors = (
+                logits_processor
+                if isinstance(logits_processor, (list, tuple))
+                else [logits_processor]
+            )
+            processor = processors[0]
+            self.processor_configs.append(
+                (
+                    processor.seeding_scheme,
+                    processor.partition_engine,
+                    processor.candidate_top_k,
+                )
+            )
         history = input_ids.clone()
         for _ in range(max_new_tokens):
             scores = torch.randn((1, self.config.vocab_size))
             if logits_processor:
-                processors = logits_processor if isinstance(logits_processor, (list, tuple)) else [logits_processor]
                 for processor in processors:
                     scores = processor(history, scores)
             probs = torch.softmax(scores, dim=-1)
@@ -82,8 +96,14 @@ def make_config(tmp_path: Path, data: Path, *, kind: str = "jsonl", max_samples:
             id_field="id",
             max_samples=max_samples,
         ),
-        generation=GenerationConfig(max_new_tokens=8),
-        watermark=WatermarkConfig(secret_key="secret", context_width=2),
+        generation=GenerationConfig(max_new_tokens=8, top_k=50),
+        watermark=WatermarkConfig(
+            secret_key="secret",
+            context_width=2,
+            candidate_top_k=50,
+            seeding_scheme="selfhash",
+            partition_engine="v2",
+        ),
         ecc=ECCConfig(),
         detection=DetectionConfig(),
         decoding=DecodingConfig(),
@@ -108,6 +128,7 @@ def test_generation_kwargs_force_equal_minimum_and_maximum(tmp_path: Path) -> No
 
     assert kwargs["min_new_tokens"] == 8
     assert kwargs["max_new_tokens"] == 8
+    assert kwargs["top_k"] == 50
 
 
 def test_generation_workflow_writes_three_exact_length_text_classes(tmp_path: Path) -> None:
@@ -142,6 +163,7 @@ def test_generation_workflow_writes_three_exact_length_text_classes(tmp_path: Pa
     assert len(record["unwatermarked"]["token_ids"]) == 8
     assert len(record["natural"]["token_ids"]) == 8
     assert all(call == {"min_new_tokens": 8, "max_new_tokens": 8} for call in model.generation_calls)
+    assert model.processor_configs == [("selfhash", "v2", 50)]
 
 
 def test_generation_filters_short_c4_and_continues_until_target(tmp_path: Path) -> None:

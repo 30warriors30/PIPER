@@ -44,6 +44,27 @@ def validate_experiment_config(
         raise ValueError("temperature must be positive when sampling")
     if not 0.0 < config.generation.top_p <= 1.0:
         raise ValueError("top_p must be in (0, 1]")
+    if config.generation.top_k is not None and config.generation.top_k <= 0:
+        raise ValueError("top_k must be positive")
+    if (
+        config.watermark.candidate_top_k is not None
+        and config.watermark.candidate_top_k <= 0
+    ):
+        raise ValueError("candidate_top_k must be positive")
+    if config.watermark.seeding_scheme not in {"history", "selfhash"}:
+        raise ValueError("seeding_scheme must be history or selfhash")
+    if config.watermark.partition_engine not in {"v1", "v2"}:
+        raise ValueError("partition_engine must be v1 or v2")
+    if (
+        config.watermark.seeding_scheme == "selfhash"
+        and config.watermark.partition_engine != "v2"
+    ):
+        raise ValueError("selfhash requires partition_engine='v2'")
+    if (
+        config.watermark.seeding_scheme == "selfhash"
+        and config.watermark.candidate_top_k is None
+    ):
+        raise ValueError("selfhash requires candidate_top_k")
     if not 0.0 < config.detection.target_fpr < 1.0:
         raise ValueError("target_fpr must be in (0, 1)")
     if config.detection.presence_test not in {"exact_binomial", "z_score"}:

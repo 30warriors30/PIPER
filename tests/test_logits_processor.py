@@ -265,3 +265,90 @@ def test_context_rows_use_one_cpu_transfer() -> None:
     processor(input_ids, torch.zeros((2, 12)))
 
     assert CountingCpuTensor.cpu_calls == 1
+
+
+def test_selfhash_biases_only_raw_top_k_candidates() -> None:
+    processor = DualLayerLogitsProcessor(
+        secret_key=b"secret",
+        context_width=2,
+        encoded_bits=(0, 1, 0, 1),
+        vocab_size=12,
+        excluded_token_ids={0},
+        presence_mode="soft",
+        delta_presence=2.0,
+        delta_payload=3.0,
+        prf_mode="paper_shared",
+        partition_engine="v2",
+        seeding_scheme="selfhash",
+        candidate_top_k=3,
+    )
+    scores = torch.zeros((1, 12))
+    scores[0, 1] = 3.0
+    scores[0, 5] = 2.0
+    scores[0, 6] = 1.0
+
+    output = processor(torch.tensor([[2, 3]]), scores)
+
+    assert (output - scores).tolist() == [
+        [0.0, 5.0, 0.0, 0.0, 0.0, 2.0, 5.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+    ]
+
+
+def test_hard_selfhash_never_promotes_tokens_outside_raw_candidates() -> None:
+    processor = DualLayerLogitsProcessor(
+        secret_key=b"secret",
+        context_width=2,
+        encoded_bits=(0, 1, 0, 1),
+        vocab_size=12,
+        excluded_token_ids={0},
+        presence_mode="hard",
+        delta_presence=0.0,
+        delta_payload=3.0,
+        prf_mode="paper_shared",
+        partition_engine="v2",
+        seeding_scheme="selfhash",
+        candidate_top_k=4,
+    )
+    scores = torch.zeros((1, 12))
+    scores[0, 1] = 4.0
+    scores[0, 5] = 3.0
+    scores[0, 6] = 2.0
+    scores[0, 2] = 1.0
+
+    output = processor(torch.tensor([[2, 3]]), scores)
+    trace = processor.last_trace
+
+    assert trace is not None
+    raw_candidates = set(trace.candidate_ids)
+    allowed = set(trace.target_ids) | set(trace.non_target_upper_ids)
+    assert raw_candidates == {1, 2, 5, 6}
+    assert {
+        token_id for token_id in range(12) if torch.isfinite(output[0, token_id])
+    } == allowed
+    assert allowed <= raw_candidates
+
+
+@pytest.mark.parametrize(
+    ("overrides", "message"),
+    [
+        ({"candidate_top_k": 0}, "candidate_top_k must be positive"),
+        (
+            {"seeding_scheme": "selfhash", "candidate_top_k": 3},
+            "selfhash requires partition_engine='v2'",
+        ),
+        (
+            {"seeding_scheme": "selfhash", "partition_engine": "v2"},
+            "selfhash requires candidate_top_k",
+        ),
+    ],
+)
+def test_selfhash_configuration_is_validated(
+    overrides: dict[str, object],
+    message: str,
+) -> None:
+    with pytest.raises(ValueError, match=message):
+        DualLayerLogitsProcessor(
+            **processor_kwargs(),
+            encoded_bits=(0, 1),
+            **overrides,
+        )

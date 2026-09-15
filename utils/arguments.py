@@ -80,6 +80,7 @@ def generation_parser() -> argparse.ArgumentParser:
     parser.add_argument("--do-sample", action=_bool_action(), default=True)
     parser.add_argument("--temperature", type=float, default=1.0)
     parser.add_argument("--top-p", type=float, default=0.95)
+    parser.add_argument("--top-k", type=int, default=50)
     parser.add_argument("--global-seed", type=int, default=42)
     parser.add_argument("--message-seed", type=int, default=42)
 
@@ -93,6 +94,17 @@ def generation_parser() -> argparse.ArgumentParser:
     parser.add_argument("--allocation-mode", default="hash_mod", choices=["hash_mod", "balanced_permutation"])
     parser.add_argument("--exclude-special-tokens", action=_bool_action(), default=True)
     parser.add_argument("--exclude-eos", action=_bool_action(), default=False)
+    parser.add_argument("--candidate-top-k", type=int, default=50)
+    parser.add_argument(
+        "--seeding-scheme",
+        default="selfhash",
+        choices=["history", "selfhash"],
+    )
+    parser.add_argument(
+        "--partition-engine",
+        default="v2",
+        choices=["v1", "v2"],
+    )
 
     parser.add_argument("--ecc-n", type=int, default=23)
     parser.add_argument("--ecc-k", type=int, default=8)
@@ -160,6 +172,7 @@ def generation_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
             do_sample=args.do_sample,
             temperature=args.temperature,
             top_p=args.top_p,
+            top_k=args.top_k,
             global_seed=args.global_seed,
             message_seed=args.message_seed,
         ),
@@ -174,6 +187,9 @@ def generation_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
             allocation_mode=args.allocation_mode,
             exclude_special_tokens=args.exclude_special_tokens,
             exclude_eos=args.exclude_eos,
+            candidate_top_k=args.candidate_top_k,
+            seeding_scheme=args.seeding_scheme,
+            partition_engine=args.partition_engine,
         ),
         ecc=ECCConfig(n=args.ecc_n, k=args.ecc_k, t=args.ecc_t),
         detection=DetectionConfig(
@@ -212,6 +228,16 @@ def detection_parser() -> argparse.ArgumentParser:
     parser.add_argument("--prf-mode", default="paper_shared", choices=["paper_shared", "domain_separated"])
     parser.add_argument("--partition-mode", default="exact_permutation", choices=["exact_permutation"])
     parser.add_argument("--allocation-mode", default="hash_mod", choices=["hash_mod", "balanced_permutation"])
+    parser.add_argument(
+        "--seeding-scheme",
+        default="selfhash",
+        choices=["history", "selfhash"],
+    )
+    parser.add_argument(
+        "--partition-engine",
+        default="v2",
+        choices=["v1", "v2"],
+    )
     parser.add_argument("--ecc-n", type=int, default=23)
     parser.add_argument("--ecc-k", type=int, default=8)
     parser.add_argument("--ecc-t", type=int, default=3)

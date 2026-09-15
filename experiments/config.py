@@ -50,6 +50,7 @@ class ParetoExperimentConfig:
     context_width: int = 4
     temperature: float = 1.0
     top_p: float = 0.95
+    top_k: int | None = None
     global_seed: int = 42
     message_seed: int = 42
     target_fpr: float = 0.01
@@ -58,6 +59,9 @@ class ParetoExperimentConfig:
     ecc_k: int = 8
     ecc_t: int = 3
     prf_mode: str = "paper_shared"
+    candidate_top_k: int | None = None
+    seeding_scheme: str = "history"
+    partition_engine: str = "v1"
     allocation_mode: str = "hash_mod"
     counting_mode: str = "unique_context"
     max_erasure_assignments: int = 64
@@ -83,6 +87,18 @@ class ParetoExperimentConfig:
             raise ValueError("exact_tokens must be positive")
         if self.context_width <= 0:
             raise ValueError("context_width must be positive")
+        if self.top_k is not None and self.top_k <= 0:
+            raise ValueError("top_k must be positive")
+        if self.candidate_top_k is not None and self.candidate_top_k <= 0:
+            raise ValueError("candidate_top_k must be positive")
+        if self.seeding_scheme not in {"history", "selfhash"}:
+            raise ValueError("seeding_scheme must be history or selfhash")
+        if self.partition_engine not in {"v1", "v2"}:
+            raise ValueError("partition_engine must be v1 or v2")
+        if self.seeding_scheme == "selfhash" and self.partition_engine != "v2":
+            raise ValueError("selfhash requires partition_engine='v2'")
+        if self.seeding_scheme == "selfhash" and self.candidate_top_k is None:
+            raise ValueError("selfhash requires candidate_top_k")
         if not 0 < self.target_fpr < 1:
             raise ValueError("target_fpr must be in (0, 1)")
         if self.presence_test not in {"exact_binomial", "z_score"}:

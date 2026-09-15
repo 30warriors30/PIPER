@@ -1,5 +1,8 @@
+import torch
+
 from watermark.detector import DualLayerDetector
 from watermark.ecc import BCHCodec
+from watermark.logits_processor import DualLayerLogitsProcessor
 from watermark.result_types import CountingResult, DecodeResult
 from tests.helpers import synthetic_upper_sequence
 
@@ -136,3 +139,115 @@ def test_detector_can_skip_payload_decoding(monkeypatch) -> None:
     assert result.hard_fill_decode.status == "not_evaluated"
     assert result.error_erasure_decode.status == "not_evaluated"
     assert result.gated_message_bits is None
+
+
+def test_selfhash_detector_uses_observed_token_for_partition_not_allocation() -> None:
+    detector = DualLayerDetector(
+        secret_key=b"secret",
+        context_width=2,
+        vocab_size=12,
+        excluded_token_ids={0},
+        prf_mode="paper_shared",
+        ecc_codec=BCHCodec(23, 8, 3),
+        threshold_mode="fixed",
+        target_fpr=0.01,
+        fixed_z_threshold=-100.0,
+        calibrated_threshold=None,
+        primary_counting_mode="all_tokens",
+        unique_ngram_width=2,
+        min_tokens_per_code_bit=1,
+        hard_fill_value=0,
+        primary_policy="tie_zero",
+        max_erasure_assignments=64,
+        seeding_scheme="selfhash",
+        partition_engine="v2",
+    )
+
+    event = detector._events_known_boundary([2, 3], [1])[0]
+
+    assert event.context == (3, 1)
+    assert event.code_bit_index == 1
+    assert event.region == 0
+    assert event.upper_hit is True
+
+
+def test_selfhash_unique_context_deduplicates_repeated_candidate_ngrams() -> None:
+    detector = DualLayerDetector(
+        secret_key=b"secret",
+        context_width=2,
+        vocab_size=12,
+        excluded_token_ids={0},
+        prf_mode="paper_shared",
+        ecc_codec=BCHCodec(23, 8, 3),
+        threshold_mode="fixed",
+        target_fpr=0.01,
+        fixed_z_threshold=-100.0,
+        calibrated_threshold=None,
+        primary_counting_mode="unique_context",
+        unique_ngram_width=2,
+        min_tokens_per_code_bit=1,
+        hard_fill_value=0,
+        primary_policy="tie_zero",
+        max_erasure_assignments=64,
+        seeding_scheme="selfhash",
+        partition_engine="v2",
+    )
+
+    result = detector.detect_continuation([2, 3], [1, 3, 1])
+
+    assert result.counting["all_tokens"].scored_tokens == 3
+    assert result.counting["unique_context"].scored_tokens == 2
+
+
+def test_selfhash_processor_and_detector_assign_same_candidate_region() -> None:
+    codec = BCHCodec(23, 8, 3)
+    processor = DualLayerLogitsProcessor(
+        secret_key=b"secret",
+        context_width=2,
+        encoded_bits=codec.encode(MESSAGE),
+        vocab_size=12,
+        excluded_token_ids={0},
+        presence_mode="soft",
+        delta_presence=0.0,
+        delta_payload=2.0,
+        prf_mode="paper_shared",
+        partition_engine="v2",
+        seeding_scheme="selfhash",
+        candidate_top_k=12,
+    )
+    detector = DualLayerDetector(
+        secret_key=b"secret",
+        context_width=2,
+        vocab_size=12,
+        excluded_token_ids={0},
+        prf_mode="paper_shared",
+        ecc_codec=codec,
+        threshold_mode="fixed",
+        target_fpr=0.01,
+        fixed_z_threshold=-100.0,
+        calibrated_threshold=None,
+        primary_counting_mode="all_tokens",
+        unique_ngram_width=2,
+        min_tokens_per_code_bit=1,
+        hard_fill_value=0,
+        primary_policy="tie_zero",
+        max_erasure_assignments=64,
+        seeding_scheme="selfhash",
+        partition_engine="v2",
+    )
+    processor(torch.tensor([[2, 3]]), torch.arange(12, dtype=torch.float32)[None])
+    trace = processor.last_trace
+
+    assert trace is not None
+    observed_token = (trace.target_ids + trace.non_target_upper_ids)[0]
+    event = detector._events_known_boundary([2, 3], [observed_token])[0]
+    expected_region = (
+        trace.embedded_bit
+        if observed_token in trace.target_ids
+        else 1 - trace.embedded_bit
+    )
+    assert event.context == trace.candidate_contexts[
+        trace.candidate_ids.index(observed_token)
+    ]
+    assert event.code_bit_index == trace.code_bit_index
+    assert event.region == expected_region

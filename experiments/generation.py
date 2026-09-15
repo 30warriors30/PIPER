@@ -77,6 +77,7 @@ class ExperimentGenerator:
             seeds=[int(row["generation_seed"]) for row in rows],
             exact_tokens=self.config.exact_tokens,
             temperature=self.config.temperature,
+            top_k=self.config.top_k,
             top_p=self.config.top_p,
             processor=processor,
         )
@@ -102,9 +103,10 @@ class ExperimentGenerator:
             delta_presence=point.delta_presence,
             delta_payload=point.delta_payload,
             prf_mode=self.config.prf_mode,
-            # Detection and existing resumable artifacts still use the v1 partition.
-            partition_engine="v1",
+            partition_engine=self.config.partition_engine,
             capture_traces=False,
+            seeding_scheme=self.config.seeding_scheme,
+            candidate_top_k=self.config.candidate_top_k,
         )
         return self._generate_batch(rows, processor)
 

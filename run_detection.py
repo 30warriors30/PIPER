@@ -74,6 +74,8 @@ def main() -> int:
             prf_mode=args.prf_mode,
             partition_mode=args.partition_mode,
             allocation_mode=args.allocation_mode,
+            seeding_scheme=args.seeding_scheme,
+            partition_engine=args.partition_engine,
             ecc_n=args.ecc_n,
             ecc_k=args.ecc_k,
             ecc_t=args.ecc_t,

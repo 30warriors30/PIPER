@@ -21,13 +21,16 @@ from watermark.prf import KeyedPRF, partition_round_keys
 @dataclass(frozen=True)
 class EmbeddingTrace:
     context_ids: tuple[int, ...]
-    partition_seed: int
+    partition_seed: int | None
     position_seed: int
     code_bit_index: int
     embedded_bit: int
     target_ids: tuple[int, ...]
     non_target_upper_ids: tuple[int, ...]
     lower_ids: tuple[int, ...]
+    candidate_ids: tuple[int, ...] = ()
+    candidate_contexts: tuple[tuple[int, ...], ...] = ()
+    candidate_partition_seeds: tuple[int, ...] = ()
 
 
 class DualLayerLogitsProcessor(LogitsProcessor):
@@ -48,6 +51,8 @@ class DualLayerLogitsProcessor(LogitsProcessor):
         encoded_bits_by_row: Sequence[Sequence[int]] | None = None,
         partition_engine: Literal["v1", "v2"] = "v1",
         capture_traces: bool = True,
+        seeding_scheme: Literal["history", "selfhash"] = "history",
+        candidate_top_k: int | None = None,
     ) -> None:
         if context_width <= 0:
             raise ValueError("context_width must be positive")
@@ -57,6 +62,14 @@ class DualLayerLogitsProcessor(LogitsProcessor):
             raise ValueError("prf_mode must be paper_shared or domain_separated")
         if partition_engine not in {"v1", "v2"}:
             raise ValueError("partition_engine must be v1 or v2")
+        if seeding_scheme not in {"history", "selfhash"}:
+            raise ValueError("seeding_scheme must be history or selfhash")
+        if candidate_top_k is not None and candidate_top_k <= 0:
+            raise ValueError("candidate_top_k must be positive")
+        if seeding_scheme == "selfhash" and partition_engine != "v2":
+            raise ValueError("selfhash requires partition_engine='v2'")
+        if seeding_scheme == "selfhash" and candidate_top_k is None:
+            raise ValueError("selfhash requires candidate_top_k")
         self.context_width = int(context_width)
         self.encoded_bits_by_row = self._normalize_codewords(
             encoded_bits=encoded_bits,
@@ -76,6 +89,10 @@ class DualLayerLogitsProcessor(LogitsProcessor):
         self.delta_payload = float(delta_payload)
         self.prf_mode = prf_mode
         self.partition_engine: Literal["v1", "v2"] = partition_engine
+        self.seeding_scheme: Literal["history", "selfhash"] = seeding_scheme
+        self.candidate_top_k = (
+            None if candidate_top_k is None else int(candidate_top_k)
+        )
         self.capture_traces = bool(capture_traces)
         self.prf = KeyedPRF(secret_key)
         if self.partition_engine == "v1":
@@ -302,6 +319,127 @@ class DualLayerLogitsProcessor(LogitsProcessor):
             self.last_traces = tuple(traces)
         return output
 
+    def _call_selfhash(
+        self,
+        contexts: tuple[tuple[int, ...], ...],
+        scores: torch.FloatTensor,
+    ) -> torch.FloatTensor:
+        assert self.partition_engine == "v2"
+        assert self.candidate_top_k is not None
+        candidate_count = min(self.candidate_top_k, self.vocab_size)
+        candidate_ids = torch.topk(
+            scores,
+            k=candidate_count,
+            dim=-1,
+        ).indices
+        candidate_rows = tuple(
+            tuple(int(token_id) for token_id in row)
+            for row in candidate_ids.detach().cpu().tolist()
+        )
+
+        position_seeds = tuple(self._seeds(context)[1] for context in contexts)
+        code_bit_indices = tuple(
+            self.allocator.allocate(seed=position_seed, code_length=len(codeword))
+            for position_seed, codeword in zip(
+                position_seeds,
+                self.encoded_bits_by_row,
+            )
+        )
+        embedded_bit_values = tuple(
+            codeword[code_bit_index]
+            for codeword, code_bit_index in zip(
+                self.encoded_bits_by_row,
+                code_bit_indices,
+            )
+        )
+        candidate_contexts = tuple(
+            tuple(
+                (*context[-(self.context_width - 1) :], candidate_id)
+                if self.context_width > 1
+                else (candidate_id,)
+                for candidate_id in row
+            )
+            for context, row in zip(contexts, candidate_rows)
+        )
+        candidate_partition_seeds = tuple(
+            tuple(self._seeds(candidate_context)[0] for candidate_context in row)
+            for row in candidate_contexts
+        )
+        round_keys_by_token = tuple(
+            tuple(partition_round_keys(seed) for seed in row)
+            for row in candidate_partition_seeds
+        )
+        regions = self.partitioner.regions_for_tokens(
+            round_keys_by_token=round_keys_by_token,
+            token_ids=candidate_ids,
+        )
+        embedded_bits = torch.tensor(
+            embedded_bit_values,
+            dtype=torch.int64,
+            device=scores.device,
+        )
+        upper_mask = (regions == 0) | (regions == 1)
+        target_mask = regions == embedded_bits[:, None]
+
+        if self.presence_mode == "hard":
+            output = torch.full_like(scores, -torch.inf)
+            candidate_scores = scores.gather(1, candidate_ids)
+            candidate_scores = candidate_scores.masked_fill(~upper_mask, -torch.inf)
+            candidate_scores = candidate_scores + (
+                target_mask.to(candidate_scores.dtype) * self.delta_payload
+            )
+            output.scatter_(1, candidate_ids, candidate_scores)
+        else:
+            output = scores.clone()
+            candidate_bias = (
+                upper_mask.to(output.dtype) * self.delta_presence
+                + target_mask.to(output.dtype) * self.delta_payload
+            )
+            output.scatter_add_(1, candidate_ids, candidate_bias)
+
+        if self.capture_traces:
+            region_rows = regions.detach().cpu().tolist()
+            traces: list[EmbeddingTrace] = []
+            for row, context in enumerate(contexts):
+                row_candidates = candidate_rows[row]
+                row_regions = region_rows[row]
+                embedded_bit = embedded_bit_values[row]
+                traces.append(
+                    EmbeddingTrace(
+                        context_ids=context,
+                        partition_seed=None,
+                        position_seed=position_seeds[row],
+                        code_bit_index=code_bit_indices[row],
+                        embedded_bit=embedded_bit,
+                        target_ids=tuple(
+                            candidate_id
+                            for candidate_id, region in zip(
+                                row_candidates, row_regions, strict=True
+                            )
+                            if region == embedded_bit
+                        ),
+                        non_target_upper_ids=tuple(
+                            candidate_id
+                            for candidate_id, region in zip(
+                                row_candidates, row_regions, strict=True
+                            )
+                            if region == 1 - embedded_bit
+                        ),
+                        lower_ids=tuple(
+                            candidate_id
+                            for candidate_id, region in zip(
+                                row_candidates, row_regions, strict=True
+                            )
+                            if region in {2, 3}
+                        ),
+                        candidate_ids=row_candidates,
+                        candidate_contexts=candidate_contexts[row],
+                        candidate_partition_seeds=candidate_partition_seeds[row],
+                    )
+                )
+            self.last_traces = tuple(traces)
+        return output
+
     def __call__(
         self,
         input_ids: torch.LongTensor,
@@ -313,6 +451,8 @@ class DualLayerLogitsProcessor(LogitsProcessor):
             tuple(int(value) for value in row) for row in context_values
         )
         self.last_traces = ()
+        if self.seeding_scheme == "selfhash":
+            return self._call_selfhash(contexts, scores)
         if self.partition_engine == "v1":
             return self._call_v1(contexts, scores)
         return self._call_v2(contexts, scores)

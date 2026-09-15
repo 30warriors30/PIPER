@@ -6,6 +6,8 @@ import pytest
 import torch
 
 from utils.batched_generation import (
+    _top_k_filter,
+    _top_p_filter,
     adaptive_batches,
     generate_exact_batch,
 )
@@ -109,3 +111,22 @@ def test_adaptive_batches_does_not_hide_non_oom_errors() -> None:
                 run=lambda chunk: (_ for _ in ()).throw(RuntimeError("bad logits")),
             )
         )
+
+
+def test_top_k_filter_keeps_only_highest_raw_scores() -> None:
+    scores = torch.tensor([[1.0, 4.0, 3.0, 2.0]])
+
+    filtered = _top_k_filter(scores, 2)
+
+    assert torch.isfinite(filtered).tolist() == [[False, True, True, False]]
+    assert filtered[0, 1:3].tolist() == [4.0, 3.0]
+
+
+def test_sampling_filters_apply_top_k_before_top_p() -> None:
+    scores = torch.tensor([[2.0, 1.0, 0.0]])
+
+    top_k_then_top_p = _top_p_filter(_top_k_filter(scores, 2), 0.70)
+    top_p_then_top_k = _top_k_filter(_top_p_filter(scores, 0.70), 2)
+
+    assert torch.isfinite(top_k_then_top_p).tolist() == [[True, False, False]]
+    assert torch.isfinite(top_p_then_top_k).tolist() == [[True, True, False]]

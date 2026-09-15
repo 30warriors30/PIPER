@@ -96,6 +96,8 @@ def _build_detector(args: argparse.Namespace, secret_key: str) -> DualLayerDetec
         primary_policy="tie_zero",
         max_erasure_assignments=64,
         evaluate_all_policies=False,
+        seeding_scheme=args.seeding_scheme,
+        partition_engine=args.partition_engine,
     )
 
 
@@ -115,6 +117,16 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--vocab-size", type=int, required=True)
     parser.add_argument("--excluded-token-ids", nargs="*", type=int, default=[])
     parser.add_argument("--context-width", type=int, default=4)
+    parser.add_argument(
+        "--seeding-scheme",
+        default="selfhash",
+        choices=["history", "selfhash"],
+    )
+    parser.add_argument(
+        "--partition-engine",
+        default="v2",
+        choices=["v1", "v2"],
+    )
     parser.add_argument("--ecc-n", type=int, default=23)
     parser.add_argument("--ecc-k", type=int, default=8)
     parser.add_argument("--ecc-t", type=int, default=3)
@@ -186,6 +198,8 @@ def main(argv: list[str] | None = None) -> int:
         "input_mode": "blind_text",
         "presence_test": "exact_binomial",
         "counting_mode": "unique_context",
+        "seeding_scheme": args.seeding_scheme,
+        "partition_engine": args.partition_engine,
         "processed_texts": processed_texts,
         "num_keys": len(keys),
         "combined": summarize_p_values(all_p_values, args.alphas),

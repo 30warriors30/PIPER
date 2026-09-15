@@ -36,6 +36,7 @@ class GenerationConfig:
     do_sample: bool = True
     temperature: float = 1.0
     top_p: float = 0.95
+    top_k: int | None = None
     global_seed: int = 42
     message_seed: int = 42
     save_token_ids: bool = True
@@ -53,6 +54,9 @@ class WatermarkConfig:
     allocation_mode: str = "hash_mod"
     exclude_special_tokens: bool = True
     exclude_eos: bool = False
+    candidate_top_k: int | None = None
+    seeding_scheme: str = "history"
+    partition_engine: str = "v1"
 
 
 @dataclass(frozen=True)

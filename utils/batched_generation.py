@@ -91,6 +91,13 @@ def _top_p_filter(logits: torch.Tensor, top_p: float) -> torch.Tensor:
     )
 
 
+def _top_k_filter(logits: torch.Tensor, top_k: int | None) -> torch.Tensor:
+    if top_k is None or top_k >= int(logits.shape[-1]):
+        return logits
+    values, indices = torch.topk(logits, k=int(top_k), dim=-1)
+    return torch.full_like(logits, -torch.inf).scatter(-1, indices, values)
+
+
 def _eos_ids(tokenizer: Any) -> tuple[int, ...]:
     value = getattr(tokenizer, "eos_token_id", None)
     if value is None:
@@ -117,6 +124,7 @@ def generate_exact_batch(
     top_p: float,
     processor: Any | None,
     do_sample: bool = True,
+    top_k: int | None = None,
 ) -> tuple[GeneratedSequence, ...]:
     """Generate exact-length decoder-only continuations in one model batch.
 
@@ -135,6 +143,8 @@ def generate_exact_batch(
         raise ValueError("temperature must be positive")
     if not 0 < top_p <= 1:
         raise ValueError("top_p must be in (0, 1]")
+    if top_k is not None and top_k <= 0:
+        raise ValueError("top_k must be positive")
     if bool(getattr(getattr(model, "config", None), "is_encoder_decoder", False)):
         raise ValueError(
             "PIPER batched generation currently supports decoder-only models"
@@ -215,6 +225,7 @@ def generate_exact_batch(
             scores = scores / float(temperature)
             if eos_ids:
                 scores[:, list(eos_ids)] = -torch.inf
+            scores = _top_k_filter(scores, top_k)
             scores = _top_p_filter(scores, float(top_p))
             probabilities = torch.softmax(scores, dim=-1)
             if not torch.isfinite(probabilities).all():

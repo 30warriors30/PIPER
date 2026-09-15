@@ -73,6 +73,7 @@ class StatelessExactPartitioner:
         self._half_bits = self._domain_bits // 2
         self._half_mask = (1 << self._half_bits) - 1
         self._eligible_ids_by_device: dict[torch.device, torch.Tensor] = {}
+        self._token_to_dense_by_device: dict[torch.device, torch.Tensor] = {}
 
     @staticmethod
     def _normalize_round_keys(round_keys: Sequence[int]) -> tuple[int, ...]:
@@ -124,6 +125,18 @@ class StatelessExactPartitioner:
                 device=normalized_device,
             )
             self._eligible_ids_by_device[normalized_device] = cached
+        return cached
+
+    def _token_to_dense_for_device(self, device: torch.device) -> torch.Tensor:
+        normalized_device = torch.device(device)
+        cached = self._token_to_dense_by_device.get(normalized_device)
+        if cached is None:
+            cached = torch.tensor(
+                self._token_to_dense,
+                dtype=torch.int64,
+                device=normalized_device,
+            )
+            self._token_to_dense_by_device[normalized_device] = cached
         return cached
 
     def rank_for_token(
@@ -199,6 +212,64 @@ class StatelessExactPartitioner:
         )
         regions[:, eligible_ids] = eligible_regions
         return regions
+
+    def regions_for_tokens(
+        self,
+        *,
+        round_keys_by_token: Sequence[Sequence[Sequence[int]]],
+        token_ids: torch.Tensor,
+    ) -> torch.Tensor:
+        if token_ids.ndim != 2:
+            raise ValueError("token_ids must have shape [batch, candidates]")
+        batch_size, candidate_count = map(int, token_ids.shape)
+        normalized_keys = tuple(
+            tuple(self._normalize_round_keys(round_keys) for round_keys in row)
+            for row in round_keys_by_token
+        )
+        if len(normalized_keys) != batch_size or any(
+            len(row) != candidate_count for row in normalized_keys
+        ):
+            raise ValueError(
+                "round_keys_by_token must match token_ids batch and candidate dimensions"
+            )
+
+        device = token_ids.device
+        flat_tokens = token_ids.to(dtype=torch.int64).reshape(-1)
+        in_range = (flat_tokens >= 0) & (flat_tokens < self.vocab_size)
+        safe_tokens = flat_tokens.clamp(min=0, max=self.vocab_size - 1)
+        dense_mapping = self._token_to_dense_for_device(device)
+        dense_indices = dense_mapping[safe_tokens]
+        eligible = in_range & (dense_indices >= 0)
+        permutation_inputs = torch.where(
+            eligible,
+            dense_indices,
+            torch.zeros_like(dense_indices),
+        ).unsqueeze(1)
+        tensor_keys = torch.tensor(
+            [
+                [self._as_signed_int64(round_key) for round_key in keys]
+                for row in normalized_keys
+                for keys in row
+            ],
+            dtype=torch.int64,
+            device=device,
+        ).reshape(batch_size * candidate_count, 6)
+
+        ranks = self._permute_tensor(permutation_inputs, tensor_keys)
+        outside_domain = ranks >= self._eligible_count
+        while bool(torch.any(outside_domain)):
+            walked_ranks = self._permute_tensor(ranks, tensor_keys)
+            ranks = torch.where(outside_domain, walked_ranks, ranks)
+            outside_domain = ranks >= self._eligible_count
+        ranks = ranks.squeeze(1)
+
+        quarter = self._eligible_count // 4
+        lower_a_end = 2 * quarter + (self._eligible_count - 2 * quarter) // 2
+        regions = torch.where(ranks < lower_a_end, 2, 3)
+        regions = torch.where(ranks < 2 * quarter, 1, regions)
+        regions = torch.where(ranks < quarter, 0, regions)
+        regions = torch.where(eligible, regions, -1)
+        return regions.reshape(batch_size, candidate_count)
 
     def _region_for_rank(self, rank: int) -> int:
         quarter = self._eligible_count // 4

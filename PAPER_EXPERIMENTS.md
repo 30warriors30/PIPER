@@ -10,6 +10,11 @@ presence_test = exact_binomial
 counting_mode = unique_context
 primary_decoding_policy = tie_zero
 detection_interface = blind_text
+seeding_scheme = selfhash
+partition_engine = v2
+candidate_top_k = 50
+sampling_top_k = 50
+sampling_top_p = 0.95
 ```
 
 `delta_presence > 0`、`hard`、`all_tokens`、Z-score gate、strict/hard-fill/error-erasure 均属于消融，不得混入 PIPER 主结果。
@@ -52,6 +57,9 @@ python run_generation.py \
   --dataset c4 --dataset-path "$C4" \
   --max-samples 8 --max-new-tokens 64 \
   --generation-batch-size "$BATCH_SIZE" \
+  --context-width 4 --candidate-top-k 50 \
+  --seeding-scheme selfhash --partition-engine v2 \
+  --top-k 50 --top-p 0.95 --temperature 1.0 \
   --presence-mode soft --delta-presence 0 --delta-payload 2 \
   --presence-test exact_binomial --counting-mode unique_context \
   --primary-decoding-policy tie_zero \
@@ -76,12 +84,16 @@ Smoke test 只用于工程验收，不放入论文表格。
 ```bash
 python -m experiments.run_pareto_sweep \
   --model-path "$MODEL" --secret-key "$KEY" \
-  --experiment-id piper_main_t200_b8 --preset paper \
+  --experiment-id piper_main_t300_b8_selfhash_top50 --preset paper \
   --calibration-samples 1000 --test-samples 1000 \
-  --exact-tokens 200 --presence-test exact_binomial \
+  --exact-tokens 300 --context-width 4 \
+  --ecc-n 23 --ecc-k 8 --ecc-t 3 \
+  --candidate-top-k 50 --seeding-scheme selfhash --partition-engine v2 \
+  --temperature 1.0 --top-k 50 --top-p 0.95 \
+  --presence-test exact_binomial \
   --generation-batch-size "$BATCH_SIZE" \
   --counting-mode unique_context --dataset-path "$C4" \
-  --stage all --overwrite
+  --only-point soft_p0_m2 --stage all --overwrite
 ```
 
 主结果读取 `runs/soft_p0_m2/metrics.json`。headline 使用 `blind_text`；`known_boundary` 只作为附录上界。
@@ -105,16 +117,18 @@ python -m experiments.run_pareto_sweep \
 
 ```bash
 python -m experiments.run_paper_null \
-  --input-file outputs/experiments/piper_main_t200_b8/shared/baseline.jsonl \
+  --input-file outputs/experiments/piper_main_t300_b8_selfhash_top50/shared/baseline.jsonl \
   --text-class natural --keys-file configs/paper_keys_20.txt \
   --vocab-size 50272 --excluded-token-ids 0 1 \
+  --context-width 4 --seeding-scheme selfhash --partition-engine v2 \
   --alphas 0.01 0.001 0.0001 \
   --output-dir outputs/paper_null/random_key_natural --overwrite
 
 python -m experiments.run_paper_null \
-  --input-file outputs/experiments/piper_main_t200_b8/shared/baseline.jsonl \
+  --input-file outputs/experiments/piper_main_t300_b8_selfhash_top50/shared/baseline.jsonl \
   --text-class unwatermarked --keys-file configs/paper_keys_20.txt \
   --vocab-size 50272 --excluded-token-ids 0 1 \
+  --context-width 4 --seeding-scheme selfhash --partition-engine v2 \
   --alphas 0.01 0.001 0.0001 \
   --output-dir outputs/paper_null/random_key_model --overwrite
 ```
@@ -138,6 +152,7 @@ python -m experiments.run_paper_null \
   --input-file /data/piper_null/c4_100k_token_ids.jsonl \
   --text-class natural --secret-key "$KEY" \
   --vocab-size 50272 --excluded-token-ids 0 1 \
+  --context-width 4 --seeding-scheme selfhash --partition-engine v2 \
   --alphas 0.01 0.001 \
   --output-dir outputs/paper_null/fixed_key_c4_100k --overwrite
 
@@ -145,6 +160,7 @@ python -m experiments.run_paper_null \
   --input-file /data/piper_null/opengen_100k_token_ids.jsonl \
   --text-class natural --secret-key "$KEY" \
   --vocab-size 50272 --excluded-token-ids 0 1 \
+  --context-width 4 --seeding-scheme selfhash --partition-engine v2 \
   --alphas 0.01 0.001 \
   --output-dir outputs/paper_null/fixed_key_opengen_100k --overwrite
 
@@ -152,6 +168,7 @@ python -m experiments.run_paper_null \
   --input-file /data/piper_null/opt_unwatermarked_100k_token_ids.jsonl \
   --text-class unwatermarked --secret-key "$KEY" \
   --vocab-size 50272 --excluded-token-ids 0 1 \
+  --context-width 4 --seeding-scheme selfhash --partition-engine v2 \
   --alphas 0.01 0.001 \
   --output-dir outputs/paper_null/fixed_key_opt_100k --overwrite
 
@@ -159,6 +176,7 @@ python -m experiments.run_paper_null \
   --input-file /data/piper_null/llama_unwatermarked_100k_token_ids.jsonl \
   --text-class unwatermarked --secret-key "$KEY" \
   --vocab-size 50272 --excluded-token-ids 0 1 \
+  --context-width 4 --seeding-scheme selfhash --partition-engine v2 \
   --alphas 0.01 0.001 \
   --output-dir outputs/paper_null/fixed_key_llama_100k --overwrite
 ```
@@ -170,6 +188,7 @@ python -m experiments.run_paper_null \
   --input-file /data/piper_null/c4_1m_token_ids.jsonl \
   --text-class natural --secret-key "$KEY" \
   --vocab-size 50272 --excluded-token-ids 0 1 \
+  --context-width 4 --seeding-scheme selfhash --partition-engine v2 \
   --alphas 0.0001 \
   --output-dir outputs/paper_null/fixed_key_c4_1m --overwrite
 ```
@@ -242,7 +261,7 @@ python -m experiments.run_shared_disjoint_comparison \
 目的：直接验证 presence gate 与 payload decoder 解耦。必须固定同一批已生成文本和完全相同的 presence 配置，只改变下游 decoder；不得为不同 decoder 重新生成文本或重新选择 presence 阈值。
 
 ```bash
-PIPER_MAIN_RUN=outputs/experiments/piper_main_t200_b8/runs/soft_p0_m2
+PIPER_MAIN_RUN=outputs/experiments/piper_main_t300_b8_selfhash_top50/runs/soft_p0_m2
 
 for POLICY in tie_zero strict hard_fill error_erasure; do
   python run_detection.py --input-type samples --run-dir "$PIPER_MAIN_RUN" \
@@ -284,6 +303,9 @@ python -m experiments.run_capacity_fpr \
   --model-path "$MODEL" --secret-key "$KEY" \
   --dataset-path "$C4" --test-samples 1000 \
   --generation-batch-size "$BATCH_SIZE" \
+  --context-width 4 --candidate-top-k 50 \
+  --seeding-scheme selfhash --partition-engine v2 \
+  --temperature 1.0 --top-k 50 --top-p 0.95 \
   --target-fpr 0.01 --output-dir outputs/paper_capacity_t500 \
   --overwrite
 ```
@@ -300,6 +322,9 @@ python -m experiments.run_length_sweep \
   --dataset-path "$C4" --test-samples 1000 \
   --t-values 100 200 300 500 1000 --b 8 \
   --generation-batch-size "$BATCH_SIZE" \
+  --context-width 4 --candidate-top-k 50 \
+  --seeding-scheme selfhash --partition-engine v2 \
+  --temperature 1.0 --top-k 50 --top-p 0.95 \
   --delta-presence 0 --delta-payload 2 --target-fpr 0.01 \
   --output-dir outputs/paper_length_b8 --overwrite
 ```
@@ -313,7 +338,10 @@ python -m experiments.run_pareto_sweep \
   --model-path "$MODEL" --secret-key "$KEY" \
   --experiment-id piper_delta_ablation --preset full \
   --calibration-samples 1000 --test-samples 1000 \
-  --exact-tokens 200 --presence-test exact_binomial \
+  --exact-tokens 300 --context-width 4 \
+  --candidate-top-k 50 --seeding-scheme selfhash --partition-engine v2 \
+  --temperature 1.0 --top-k 50 --top-p 0.95 \
+  --presence-test exact_binomial \
   --generation-batch-size "$BATCH_SIZE" \
   --counting-mode unique_context --dataset-path "$C4" \
   --stage all --overwrite
@@ -362,14 +390,14 @@ python run_detection.py --input-type samples --run-dir outputs/paper_smoke \
 
 ```bash
 python -m experiments.attack.run_synonym_attacks \
-  --experiment-dir outputs/experiments/piper_main_t200_b8 \
+  --experiment-dir outputs/experiments/piper_main_t300_b8_selfhash_top50 \
   --point-id soft_p0_m2 --attack-rate 0.10 \
   --attacks replacement deletion insertion \
   --headline-input-mode blind_text --input-modes blind_text \
   --overwrite
 
 python -m experiments.attack.run_paraphrase_attacks \
-  --experiment-dir outputs/experiments/piper_main_t200_b8 \
+  --experiment-dir outputs/experiments/piper_main_t300_b8_selfhash_top50 \
   --point-id soft_p0_m2 \
   --headline-input-mode blind_text --input-modes blind_text \
   --paraphraser-model /data/models/tuner007/pegasus_paraphrase \
@@ -382,17 +410,17 @@ python -m experiments.attack.run_paraphrase_attacks \
 
 ```bash
 python -m experiments.mpac_comparison \
-  --experiment-dir outputs/experiments/piper_main_t200_b8 \
+  --experiment-dir outputs/experiments/piper_main_t300_b8_selfhash_top50 \
   --mb-repo /data/repos/mb-lm-watermarking \
   --output-dir outputs/baselines/mpac --model-path "$MODEL" \
-  --brew-point-id soft_p0_m2 --exact-tokens 200 \
+  --brew-point-id soft_p0_m2 --exact-tokens 300 \
   --message-length 8 --target-fpr 0.01 --overwrite
 
 python -m experiments.segment_rsbh_comparison \
-  --experiment-dir outputs/experiments/piper_main_t200_b8 \
+  --experiment-dir outputs/experiments/piper_main_t300_b8_selfhash_top50 \
   --segment-repo /data/repos/segment-watermark \
   --output-dir outputs/baselines/segment_rsbh --model-path "$MODEL" \
-  --brew-point-id soft_p0_m2 --exact-tokens 200 \
+  --brew-point-id soft_p0_m2 --exact-tokens 300 \
   --message-length 8 --target-fpr 0.01 --overwrite
 ```
 

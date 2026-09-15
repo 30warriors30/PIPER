@@ -63,6 +63,8 @@ def build_detector(config: ExperimentConfig, tokenizer: Any, vocab_size: int) ->
         primary_policy=config.decoding.primary_policy,
         max_erasure_assignments=config.decoding.max_erasure_assignments,
         evaluate_all_policies=config.decoding.evaluate_all_policies,
+        seeding_scheme=config.watermark.seeding_scheme,
+        partition_engine=config.watermark.partition_engine,
     )
 
 
@@ -307,6 +309,8 @@ def _external_config(
     prf_mode: str,
     partition_mode: str,
     allocation_mode: str,
+    seeding_scheme: str,
+    partition_engine: str,
     ecc_n: int,
     ecc_k: int,
     ecc_t: int,
@@ -334,6 +338,8 @@ def _external_config(
             prf_mode=prf_mode,
             partition_mode=partition_mode,
             allocation_mode=allocation_mode,
+            seeding_scheme=seeding_scheme,
+            partition_engine=partition_engine,
         ),
         ecc=ECCConfig(n=ecc_n, k=ecc_k, t=ecc_t),
         detection=DetectionConfig(
@@ -370,6 +376,8 @@ def run_text_detection(
     prf_mode: str,
     partition_mode: str,
     allocation_mode: str,
+    seeding_scheme: str = "selfhash",
+    partition_engine: str = "v2",
     ecc_n: int,
     ecc_k: int,
     ecc_t: int,
@@ -402,6 +410,8 @@ def run_text_detection(
         prf_mode=prf_mode,
         partition_mode=partition_mode,
         allocation_mode=allocation_mode,
+        seeding_scheme=seeding_scheme,
+        partition_engine=partition_engine,
         ecc_n=ecc_n,
         ecc_k=ecc_k,
         ecc_t=ecc_t,

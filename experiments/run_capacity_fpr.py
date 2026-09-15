@@ -270,6 +270,10 @@ def _experiment_metadata(args: argparse.Namespace) -> dict[str, Any]:
         "context_width": args.context_width,
         "temperature": args.temperature,
         "top_p": args.top_p,
+        "top_k": args.top_k,
+        "candidate_top_k": args.candidate_top_k,
+        "seeding_scheme": args.seeding_scheme,
+        "partition_engine": args.partition_engine,
         "global_seed": args.global_seed,
         "message_seed": args.message_seed,
         "max_erasure_assignments": args.max_erasure_assignments,
@@ -415,6 +419,7 @@ def _generation_kwargs(
         "do_sample": True,
         "temperature": args.temperature,
         "top_p": args.top_p,
+        "top_k": args.top_k,
         "pad_token_id": getattr(tokenizer, "pad_token_id", None),
         "eos_token_id": getattr(tokenizer, "eos_token_id", None),
     }
@@ -446,6 +451,7 @@ def _generate_exact(
         seeds=(int(seed),),
         exact_tokens=EXACT_TOKENS,
         temperature=args.temperature,
+        top_k=args.top_k,
         top_p=args.top_p,
         processor=processor,
     )[0]
@@ -476,6 +482,7 @@ def generate_shared_baseline(
             seeds=[int(row["generation_seed"]) for row in chunk],
             exact_tokens=EXACT_TOKENS,
             temperature=args.temperature,
+            top_k=args.top_k,
             top_p=args.top_p,
             processor=None,
         ),
@@ -538,6 +545,8 @@ def _build_detector(
         primary_policy=PRIMARY_POLICY,
         max_erasure_assignments=args.max_erasure_assignments,
         evaluate_all_policies=True,
+        seeding_scheme=args.seeding_scheme,
+        partition_engine=args.partition_engine,
     )
 
 
@@ -707,9 +716,10 @@ def generate_capacity_point(
             delta_presence=DELTA_PRESENCE,
             delta_payload=DELTA_PAYLOAD,
             prf_mode="paper_shared",
-            # Detection and existing resumable artifacts still use the v1 partition.
-            partition_engine="v1",
+            partition_engine=args.partition_engine,
             capture_traces=False,
+            seeding_scheme=args.seeding_scheme,
+            candidate_top_k=args.candidate_top_k,
         )
         return generate_exact_batch(
             model=model,
@@ -719,6 +729,7 @@ def generate_capacity_point(
             seeds=[int(row["generation_seed"]) for row, _, _ in chunk],
             exact_tokens=EXACT_TOKENS,
             temperature=args.temperature,
+            top_k=args.top_k,
             top_p=args.top_p,
             processor=processor,
         )
@@ -960,6 +971,18 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--context-width", type=int, default=CONTEXT_WIDTH)
     parser.add_argument("--temperature", type=float, default=TEMPERATURE)
     parser.add_argument("--top-p", type=float, default=TOP_P)
+    parser.add_argument("--top-k", type=int, default=50)
+    parser.add_argument("--candidate-top-k", type=int, default=50)
+    parser.add_argument(
+        "--seeding-scheme",
+        default="selfhash",
+        choices=["history", "selfhash"],
+    )
+    parser.add_argument(
+        "--partition-engine",
+        default="v2",
+        choices=["v1", "v2"],
+    )
     parser.add_argument(
         "--generation-batch-size",
         type=int,
@@ -995,6 +1018,12 @@ def _validate_args(args: argparse.Namespace) -> None:
         raise ValueError("--test-samples must be positive")
     if args.context_width <= 0:
         raise ValueError("--context-width must be positive")
+    if args.top_k <= 0:
+        raise ValueError("--top-k must be positive")
+    if args.candidate_top_k <= 0:
+        raise ValueError("--candidate-top-k must be positive")
+    if args.seeding_scheme == "selfhash" and args.partition_engine != "v2":
+        raise ValueError("selfhash requires --partition-engine v2")
     if args.generation_batch_size <= 0:
         raise ValueError("--generation-batch-size must be positive")
     if args.max_erasure_assignments <= 0:

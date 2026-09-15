@@ -96,6 +96,7 @@ class PairedGenerator:
         if self.config.generation.do_sample:
             kwargs["temperature"] = self.config.generation.temperature
             kwargs["top_p"] = self.config.generation.top_p
+            kwargs["top_k"] = self.config.generation.top_k
         return {key: value for key, value in kwargs.items() if value is not None}
 
     def _generate_once(
@@ -155,6 +156,9 @@ class PairedGenerator:
             delta_presence=self.config.watermark.delta_presence,
             delta_payload=self.config.watermark.delta_payload,
             prf_mode=self.config.watermark.prf_mode,
+            partition_engine=self.config.watermark.partition_engine,
+            seeding_scheme=self.config.watermark.seeding_scheme,
+            candidate_top_k=self.config.watermark.candidate_top_k,
         )
         unwm_output, unwm_seconds = self._generate_once(
             input_ids, attention_mask, seed, None
@@ -232,6 +236,7 @@ class PairedGenerator:
             "exact_tokens": int(self.config.generation.max_new_tokens),
             "temperature": self.config.generation.temperature,
             "top_p": self.config.generation.top_p,
+            "top_k": self.config.generation.top_k,
             "do_sample": self.config.generation.do_sample,
         }
         unwatermarked = generate_exact_batch(processor=None, **common)
@@ -245,9 +250,10 @@ class PairedGenerator:
             delta_presence=self.config.watermark.delta_presence,
             delta_payload=self.config.watermark.delta_payload,
             prf_mode=self.config.watermark.prf_mode,
-            # Detection and existing resumable artifacts still use the v1 partition.
-            partition_engine="v1",
+            partition_engine=self.config.watermark.partition_engine,
             capture_traces=False,
+            seeding_scheme=self.config.watermark.seeding_scheme,
+            candidate_top_k=self.config.watermark.candidate_top_k,
         )
         watermarked = generate_exact_batch(processor=processor, **common)
 
@@ -288,6 +294,11 @@ def generation_summary(config: ExperimentConfig) -> str:
             f"Presence:       {config.watermark.presence_mode}",
             f"PRF:            {config.watermark.prf_mode}",
             f"Partition:      {config.watermark.partition_mode}",
+            f"Partition seed: {config.watermark.seeding_scheme}",
+            f"Engine:         {config.watermark.partition_engine}",
+            f"Raw candidates: {config.watermark.candidate_top_k}",
+            f"Sampling top-k: {config.generation.top_k}",
+            f"Sampling top-p: {config.generation.top_p}",
             f"Allocation:     {config.watermark.allocation_mode}",
             f"BCH:            ({config.ecc.n}, {config.ecc.k}, t={config.ecc.t})",
             f"Context width:  {config.watermark.context_width}",

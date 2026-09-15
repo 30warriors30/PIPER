@@ -31,6 +31,10 @@ def test_generation_parser_builds_config() -> None:
     assert config.detection.counting_mode == "unique_context"
     assert config.decoding.primary_policy == "tie_zero"
     assert config.decoding.max_erasure_assignments == 64
+    assert config.generation.top_k == 50
+    assert config.watermark.candidate_top_k == 50
+    assert config.watermark.seeding_scheme == "selfhash"
+    assert config.watermark.partition_engine == "v2"
 
 
 def test_batch_execution_defaults_and_validation() -> None:
@@ -98,6 +102,28 @@ def test_pareto_parser_passes_batch_overrides_to_config() -> None:
     assert config.generation_batch_size == 3
     assert config.detection_batch_size == 5
     assert config.detection_workers == 2
+    assert config.top_k == 50
+    assert config.candidate_top_k == 50
+    assert config.seeding_scheme == "selfhash"
+    assert config.partition_engine == "v2"
+
+
+def test_old_experiment_dictionary_loads_with_legacy_partition_semantics() -> None:
+    args = generation_parser().parse_args(
+        ["--model-path", "model", "--secret-key", "key", "--run-id", "run"]
+    )
+    data = generation_config_from_args(args).to_dict()
+    data["generation"].pop("top_k")
+    data["watermark"].pop("candidate_top_k")
+    data["watermark"].pop("seeding_scheme")
+    data["watermark"].pop("partition_engine")
+
+    restored = ExperimentConfig.from_dict(data)
+
+    assert restored.generation.top_k is None
+    assert restored.watermark.candidate_top_k is None
+    assert restored.watermark.seeding_scheme == "history"
+    assert restored.watermark.partition_engine == "v1"
 
 
 def test_detection_entrypoint_rejects_import_without_resume() -> None:
@@ -211,3 +237,6 @@ def test_detection_entrypoint_threads_execution_overrides(
         detection_batch_size=5,
         detection_workers=2,
     )
+    if runner_name == "run_text_detection":
+        assert captured["seeding_scheme"] == "selfhash"
+        assert captured["partition_engine"] == "v2"

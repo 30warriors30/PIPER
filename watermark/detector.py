@@ -3,7 +3,7 @@ from __future__ import annotations
 import math
 from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import AbstractSet
+from typing import AbstractSet, Literal
 
 from scipy.stats import binom, norm
 
@@ -11,7 +11,8 @@ from watermark.result_types import CountingResult, DecodeResult, DetectionResult
 from watermark.allocator import HashModuloAllocator
 from watermark.ecc import BCHCodec
 from watermark.partition import ExactPermutationPartitioner, Partition
-from watermark.prf import KeyedPRF
+from watermark.partition_v2 import StatelessExactPartitioner
+from watermark.prf import KeyedPRF, partition_round_keys
 
 
 @dataclass(frozen=True)
@@ -48,6 +49,8 @@ class DualLayerDetector:
         max_erasure_assignments: int,
         evaluate_all_policies: bool = True,
         presence_test: str = "z_score",
+        seeding_scheme: Literal["history", "selfhash"] = "history",
+        partition_engine: Literal["v1", "v2"] = "v1",
     ) -> None:
         if context_width <= 0:
             raise ValueError("context_width must be positive")
@@ -69,6 +72,12 @@ class DualLayerDetector:
             )
         if presence_test not in {"exact_binomial", "z_score"}:
             raise ValueError("presence_test must be exact_binomial or z_score")
+        if seeding_scheme not in {"history", "selfhash"}:
+            raise ValueError("seeding_scheme must be history or selfhash")
+        if partition_engine not in {"v1", "v2"}:
+            raise ValueError("partition_engine must be v1 or v2")
+        if seeding_scheme == "selfhash" and partition_engine != "v2":
+            raise ValueError("selfhash requires partition_engine='v2'")
         if max_erasure_assignments <= 0:
             raise ValueError("max_erasure_assignments must be positive")
         self.context_width = int(context_width)
@@ -84,11 +93,20 @@ class DualLayerDetector:
         self.max_erasure_assignments = int(max_erasure_assignments)
         self.evaluate_all_policies = bool(evaluate_all_policies)
         self.presence_test = presence_test
+        self.seeding_scheme: Literal["history", "selfhash"] = seeding_scheme
+        self.partition_engine: Literal["v1", "v2"] = partition_engine
         self.alpha = float(target_fpr)
         if not 0.0 < self.alpha < 1.0:
             raise ValueError("target_fpr must be in (0, 1)")
         self.prf = KeyedPRF(secret_key)
-        self.partitioner = ExactPermutationPartitioner()
+        self.partitioner = (
+            ExactPermutationPartitioner()
+            if self.partition_engine == "v1"
+            else StatelessExactPartitioner(
+                self.vocab_size,
+                self.excluded_token_ids,
+            )
+        )
         self.allocator = HashModuloAllocator()
         self.z_threshold = self._resolve_threshold(
             threshold_mode=threshold_mode,
@@ -131,11 +149,16 @@ class DualLayerDetector:
     def partition_for_context(self, context: Sequence[int]) -> tuple[Partition, int]:
         context_tuple = tuple(int(token_id) for token_id in context[-self.context_width :])
         partition_seed, position_seed = self._seeds(context_tuple)
-        partition = self.partitioner.partition(
-            seed=partition_seed,
-            vocab_size=self.vocab_size,
-            excluded_ids=self.excluded_token_ids,
-        )
+        if self.partition_engine == "v1":
+            partition = self.partitioner.partition(
+                seed=partition_seed,
+                vocab_size=self.vocab_size,
+                excluded_ids=self.excluded_token_ids,
+            )
+        else:
+            partition = self.partitioner.partition_for_context(
+                round_keys=partition_round_keys(partition_seed)
+            )
         code_bit_index = self.allocator.allocate(
             seed=position_seed,
             code_length=self.ecc_codec.n,
@@ -151,25 +174,40 @@ class DualLayerDetector:
         events: list[_TokenEvent] = []
         for raw_token in continuation_ids:
             token_id = int(raw_token)
-            context = tuple(history[-self.context_width :])
-            partition_seed, position_seed = self._seeds(context)
-            region = self.partitioner.region_for_token(
-                seed=partition_seed,
-                vocab_size=self.vocab_size,
-                excluded_ids=self.excluded_token_ids,
-                token_id=token_id,
-            )
+            allocation_context = tuple(history[-self.context_width :])
+            if self.seeding_scheme == "selfhash":
+                partition_context = tuple(
+                    [*history[-(self.context_width - 1) :], token_id]
+                    if self.context_width > 1
+                    else [token_id]
+                )
+            else:
+                partition_context = allocation_context
+            partition_seed = self._seeds(partition_context)[0]
+            position_seed = self._seeds(allocation_context)[1]
+            if self.partition_engine == "v1":
+                region = self.partitioner.region_for_token(
+                    seed=partition_seed,
+                    vocab_size=self.vocab_size,
+                    excluded_ids=self.excluded_token_ids,
+                    token_id=token_id,
+                )
+            else:
+                region = self.partitioner.region_for_token(
+                    round_keys=partition_round_keys(partition_seed),
+                    token_id=token_id,
+                )
             code_bit_index = self.allocator.allocate(
                 seed=position_seed,
                 code_length=self.ecc_codec.n,
             )
             events.append(
                 _TokenEvent(
-                    context=context,
+                    context=partition_context,
                     token_id=token_id,
                     code_bit_index=code_bit_index,
                     region=region,
-                    upper_hit=region is not None,
+                    upper_hit=region in {0, 1},
                     eligible=(
                         0 <= token_id < self.vocab_size
                         and token_id not in self.excluded_token_ids

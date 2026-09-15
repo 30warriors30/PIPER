@@ -67,6 +67,30 @@ def test_updated_detection_config_preserves_execution() -> None:
     assert updated.execution == execution
 
 
+def test_build_detector_threads_selfhash_partition_metadata() -> None:
+    config = ExperimentConfig(
+        model=ModelConfig(path="fake", device="cpu", dtype="float32"),
+        dataset=DatasetConfig(),
+        generation=GenerationConfig(top_k=50),
+        watermark=WatermarkConfig(
+            secret_key="secret",
+            context_width=4,
+            candidate_top_k=50,
+            seeding_scheme="selfhash",
+            partition_engine="v2",
+        ),
+        ecc=ECCConfig(),
+        detection=DetectionConfig(),
+        decoding=DecodingConfig(),
+        output=OutputConfig(root="outputs", run_id="run"),
+    )
+
+    detector = build_detector(config, FakeTokenizer(), 32)
+
+    assert detector.seeding_scheme == "selfhash"
+    assert detector.partition_engine == "v2"
+
+
 def test_samples_detection_writes_six_records(tmp_path: Path, monkeypatch) -> None:
     run_dir = tmp_path / "run"
     run_dir.mkdir()

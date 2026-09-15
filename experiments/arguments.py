@@ -28,6 +28,7 @@ def experiment_parser(description: str = "Run dual-layer watermark Pareto experi
     parser.add_argument("--context-width", type=int, default=4)
     parser.add_argument("--temperature", type=float, default=1.0)
     parser.add_argument("--top-p", type=float, default=0.95)
+    parser.add_argument("--top-k", type=int, default=50)
     parser.add_argument("--global-seed", type=int, default=42)
     parser.add_argument("--message-seed", type=int, default=42)
     parser.add_argument("--target-fpr", type=float, default=0.01)
@@ -37,6 +38,9 @@ def experiment_parser(description: str = "Run dual-layer watermark Pareto experi
     parser.add_argument("--ecc-k", type=int, default=8)
     parser.add_argument("--ecc-t", type=int, default=3)
     parser.add_argument("--prf-mode", default="paper_shared", choices=["paper_shared", "domain_separated"])
+    parser.add_argument("--candidate-top-k", type=int, default=50)
+    parser.add_argument("--seeding-scheme", default="selfhash", choices=["history", "selfhash"])
+    parser.add_argument("--partition-engine", default="v2", choices=["v1", "v2"])
     parser.add_argument("--allocation-mode", default="hash_mod", choices=["hash_mod", "balanced_permutation"])
     parser.add_argument("--counting-mode", default="unique_context", choices=["all_tokens", "unique_context", "unique_ngram"])
     parser.add_argument("--max-erasure-assignments", type=int, default=64)
@@ -78,6 +82,7 @@ def config_from_args(args: argparse.Namespace) -> ParetoExperimentConfig:
         context_width=args.context_width,
         temperature=args.temperature,
         top_p=args.top_p,
+        top_k=args.top_k,
         global_seed=args.global_seed,
         message_seed=args.message_seed,
         target_fpr=args.target_fpr,
@@ -86,6 +91,9 @@ def config_from_args(args: argparse.Namespace) -> ParetoExperimentConfig:
         ecc_k=args.ecc_k,
         ecc_t=args.ecc_t,
         prf_mode=args.prf_mode,
+        candidate_top_k=args.candidate_top_k,
+        seeding_scheme=args.seeding_scheme,
+        partition_engine=args.partition_engine,
         allocation_mode=args.allocation_mode,
         counting_mode=args.counting_mode,
         max_erasure_assignments=args.max_erasure_assignments,
@@ -129,6 +137,10 @@ def print_plan(config: ParetoExperimentConfig, args: argparse.Namespace, points)
     print(f"Manifest samples:   {config.total_manifest_samples}")
     print(f"Calibration/test:   {config.calibration_samples} / {config.test_samples}")
     print(f"Exact tokens:       {config.exact_tokens}")
+    print(f"Partition seed:     {config.seeding_scheme}")
+    print(f"Partition engine:   {config.partition_engine}")
+    print(f"Raw candidate top-k: {config.candidate_top_k}")
+    print(f"Sampling top-k/p:   {config.top_k} / {config.top_p}")
     print(f"Target FPR:         {config.target_fpr}")
     print(f"Presence test:      {config.presence_test}")
     print(f"Counting mode:      {config.counting_mode}")
