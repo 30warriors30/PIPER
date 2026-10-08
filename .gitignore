@@ -5,7 +5,13 @@ __pycache__/
 htmlcov/
 outputs/*
 !outputs/.gitkeep
+/data/
+/models/
+/checkpoints/
+.env
+.env.*
 *.log
 .DS_Store
 
 .worktrees/
+docs/superpowers/

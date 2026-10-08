@@ -262,7 +262,7 @@ def test_generate_mpac_watermarked_batch_batches_model_and_preserves_rows():
 
 
 def test_root_wrapper_exposes_mpac_comparison_module():
-    repo_root = Path(__file__).resolve().parents[3]
+    repo_root = Path(__file__).resolve().parents[2]
 
     completed = subprocess.run(
         [sys.executable, "-m", "experiments.mpac_comparison", "--help"],
@@ -277,15 +277,15 @@ def test_root_wrapper_exposes_mpac_comparison_module():
     assert "--generation-batch-size GENERATION_BATCH_SIZE" in completed.stdout
 
 
-def test_root_wrapper_does_not_shadow_project_package_imports():
-    repo_root = Path(__file__).resolve().parents[3]
+def test_module_importable_from_repo_root():
+    repo_root = Path(__file__).resolve().parents[2]
 
     completed = subprocess.run(
         [
             sys.executable,
             "-c",
             (
-                "from dual_layer_watermark_fixed_length_error_erasure.experiments.mpac_comparison "
+                "from experiments.mpac_comparison "
                 "import build_parser; print(build_parser().description)"
             ),
         ],
@@ -321,8 +321,8 @@ def test_validate_runtime_args_rejects_unavailable_cuda(monkeypatch):
 
 
 def test_relative_paths_resolve_under_project_when_called_from_repo_root(monkeypatch):
-    repo_root = Path(__file__).resolve().parents[3]
-    project_dir = repo_root / "dual_layer_watermark_fixed_length_error_erasure"
+    repo_root = Path(__file__).resolve().parents[2]
+    project_dir = repo_root
     monkeypatch.chdir(repo_root)
 
     experiment_dir = resolve_input_path("outputs/experiments/opt13b_pareto_49x200")

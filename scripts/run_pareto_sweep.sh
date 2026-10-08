@@ -2,37 +2,21 @@
 set -euo pipefail
 
 PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-MODEL_PATH="${MODEL_PATH:-/data/yanlu/BREW/models/facebook/opt-1.3b}"
-C4_PATH="${C4_PATH:-/data/yanlu/BREW/dataset/c4/processed_c4.json}"
+: "${MODEL_PATH:?Set MODEL_PATH to a local OPT-1.3B checkpoint directory}"
+: "${C4_PATH:?Set C4_PATH to the processed C4 RealNewsLike JSONL file}"
 SECRET_KEY="${SECRET_KEY:-dual-layer-key-2026}"
-EXPERIMENT_ID="${EXPERIMENT_ID:-piper_main_t200_b8}"
+EXPERIMENT_ID="${EXPERIMENT_ID:-piper_main_t300_b8_selfhash_top50}"
 OUTPUT_ROOT="${OUTPUT_ROOT:-outputs/experiments}"
-
-PRESET="${PRESET:-paper}"
-STAGE="${STAGE:-all}"
-CALIBRATION_SAMPLES="${CALIBRATION_SAMPLES:-1000}"
-TEST_SAMPLES="${TEST_SAMPLES:-1000}"
-EXACT_TOKENS="${EXACT_TOKENS:-200}"
-TARGET_FPR="${TARGET_FPR:-0.01}"
-PRESENCE_TEST="${PRESENCE_TEST:-exact_binomial}"
-COUNTING_MODE="${COUNTING_MODE:-unique_context}"
 BATCH_SIZE="${BATCH_SIZE:-16}"
+DEVICE="${DEVICE:-cuda}"
+DTYPE="${DTYPE:-float16}"
 
 cd "$PROJECT_ROOT"
 export PYTHONNOUSERSITE=1
-export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-1}"
 
 if [[ "${DRY_RUN:-0}" != "1" ]]; then
-  if [[ ! -e "$MODEL_PATH" ]]; then
-    echo "MODEL_PATH does not exist: $MODEL_PATH" >&2
-    echo "Set MODEL_PATH=/path/to/local/model before running this script." >&2
-    exit 1
-  fi
-  if [[ ! -f "$C4_PATH" ]]; then
-    echo "C4_PATH does not exist: $C4_PATH" >&2
-    echo "Set C4_PATH=/path/to/processed_c4.json before running this script." >&2
-    exit 1
-  fi
+  [[ -d "$MODEL_PATH" ]] || { echo "MODEL_PATH does not exist: $MODEL_PATH" >&2; exit 1; }
+  [[ -f "$C4_PATH" ]] || { echo "C4_PATH does not exist: $C4_PATH" >&2; exit 1; }
 fi
 
 mode_args=(--resume)
@@ -44,18 +28,17 @@ if [[ "${DRY_RUN:-0}" == "1" ]]; then
 fi
 
 python -m experiments.run_pareto_sweep \
-  --model-path "$MODEL_PATH" \
-  --secret-key "$SECRET_KEY" \
-  --experiment-id "$EXPERIMENT_ID" \
-  --output-root "$OUTPUT_ROOT" \
-  --preset "$PRESET" \
-  --stage "$STAGE" \
-  --calibration-samples "$CALIBRATION_SAMPLES" \
-  --test-samples "$TEST_SAMPLES" \
-  --exact-tokens "$EXACT_TOKENS" \
-  --generation-batch-size "$BATCH_SIZE" \
-  --target-fpr "$TARGET_FPR" \
-  --presence-test "$PRESENCE_TEST" \
-  --counting-mode "$COUNTING_MODE" \
-  --dataset-path "$C4_PATH" \
+  --model-path "$MODEL_PATH" --secret-key "$SECRET_KEY" \
+  --experiment-id "$EXPERIMENT_ID" --output-root "$OUTPUT_ROOT" \
+  --preset paper --only-point soft_p0_m2 --stage all \
+  --calibration-samples 1000 --test-samples 5000 --limit-test 1000 \
+  --exact-tokens 300 --context-width 4 \
+  --ecc-n 23 --ecc-k 8 --ecc-t 3 \
+  --prf-mode paper_shared --allocation-mode hash_mod \
+  --candidate-top-k 50 --seeding-scheme selfhash --partition-engine v2 \
+  --temperature 1.0 --top-k 50 --top-p 0.95 \
+  --presence-test exact_binomial --target-fpr 0.01 \
+  --counting-mode unique_context --dataset-path "$C4_PATH" \
+  --global-seed 42 --message-seed 42 \
+  --generation-batch-size "$BATCH_SIZE" --device "$DEVICE" --dtype "$DTYPE" \
   "${mode_args[@]}"

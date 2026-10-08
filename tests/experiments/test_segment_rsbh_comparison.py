@@ -149,7 +149,7 @@ def test_build_parser_defaults_match_confirmed_segment_baseline():
 
 
 def test_root_wrapper_exposes_segment_comparison_module():
-    repo_root = Path(__file__).resolve().parents[3]
+    repo_root = Path(__file__).resolve().parents[2]
 
     completed = subprocess.run(
         [sys.executable, "-m", "experiments.segment_rsbh_comparison", "--help"],
